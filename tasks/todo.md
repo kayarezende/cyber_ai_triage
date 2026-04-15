@@ -412,17 +412,20 @@ Per investigation, write to MinIO:
 - [ ] Provision Anthropic + OpenRouter + LangSmith accounts.
 
 **Wk 1 — Scaffolding + data + observability**
-- [ ] Repo layout + `.gitignore`, `README.md` stub.
-- [ ] `docker-compose.yml` with all service stubs building + starting.
-- [ ] Postgres + Alembic + initial migration (all tables above).
-- [ ] `langgraph-checkpoint-postgres` `setup()` — checkpointer tables created.
+
+_Session 1 (2026-04-15 / 16): uv workspace + infra compose + Alembic + checkpointer landed. Commits `ccd090d`, `dffdbed`._
+
+- [x] Repo layout + `.gitignore`, `README.md` stub.
+- [~] `docker-compose.yml` with all service stubs building + starting. _Infra only (postgres, redis, minio) — app service stubs deferred to session 2._
+- [x] Postgres + Alembic + initial migration (all tables above).
+- [x] `langgraph-checkpoint-postgres` `setup()` — checkpointer tables created.
 - [ ] Seed MITRE STIX → `mitre_techniques` table.
 - [ ] **Load Splunk BOTS v3 into local Splunk.**
 - [ ] `structlog` → stdout JSON wired in all services.
 - [ ] Dev bypass auth flag (`DEV_BYPASS_AUTH=1`) in FastAPI + Next.js middleware.
-- [ ] Fernet key generation + `.env.example` documented.
-- [ ] LangSmith project + API key wired.
-- [ ] `docker compose up` brings up empty-but-healthy stack.
+- [~] Fernet key generation + `.env.example` documented. _Env var + inline generate command documented; `libs/crypto.py` helper pending session 2._
+- [~] LangSmith project + API key wired. _Env vars in `.env.example`; orchestrator import/init pending session 2._
+- [~] `docker compose up` brings up empty-but-healthy stack. _Infra subset healthy; full stack pending session 2 app stubs._
 
 **Wk 2 — MCP SIEM server v1 + framework validation**
 - [ ] Python MCP server (`mcp` official SDK) exposing `siem_query`, `siem_get_notable` backed by Splunk.
@@ -544,6 +547,26 @@ Per investigation, write to MinIO:
 _Pending._
 
 ### Wk 1 Review
-_Pending._
+
+**Session 1 (2026-04-15 / 16) — foundational scaffold.**
+
+Landed (commits `ccd090d`, `dffdbed`):
+- Baseline commit of 24 planning files.
+- uv 0.9.26 workspace: root `pyproject.toml` with `[tool.uv.workspace]` + 5 non-packaged members (`apps/api`, `apps/orchestrator`, `apps/worker`, `mcp/splunk`, `libs/ocsf`). Dev deps in `[dependency-groups] dev`. `uv.lock` committed.
+- Next.js 15.5.15 + React 19.1 + Tailwind 4 + TS strict at `apps/web/`; production build verified.
+- `docker-compose.yml` infra services (postgres:16, redis:7-alpine, minio/minio) with healthchecks + named volumes; all three report `healthy`.
+- Alembic initial migration (`81e2d43b3ec0_initial_schema.py`): 10 app tables + `pgcrypto` extension + 8 RLS policies on tenant-scoped tables using `current_setting('app.current_tenant', true)::uuid` (missing-ok). `alembic.ini` script location set; `env.py` loads `DATABASE_URL` from `.env`.
+- LangGraph Postgres checkpointer setup script (`db/seeds/setup_checkpointer.py`) using verified `with PostgresSaver.from_conn_string(...) as cp: cp.setup()` context-manager pattern. Created 4 tables: `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`.
+- `.env.example` enumerating all env vars (Splunk remote LAN/VPN, OpenRouter, LangSmith, Anthropic, Fernet, webhook secret, dev-bypass, Postgres, Redis, MinIO).
+- `README.md` with quickstart.
+
+Verified end-to-end: `\dt` shows 15 rows (10 app + 4 checkpointer + `alembic_version`); `pg_policies` shows 8 tenant_isolation policies; Next.js `npm run build` passes.
+
+Deferred to session 2 (still Wk 1 scope): MITRE STIX seeder, shared `libs/` utilities (`logging.py`, `crypto.py`, `db.py`), FastAPI/orchestrator/worker/mcp-splunk Dockerfiles + `/health` stubs, full compose with app services, LangSmith orchestrator wire-up, dev-bypass middleware in FastAPI + Next.js, `docs/splunk-setup.md`, BOTS v3 load script.
+
+Decisions surfaced for later resolution:
+- Dep name fix: `splunk-sdk` (PyPI), not `splunk-sdk-python` as written in CLAUDE.md / stack-locks. Update when adding the dep in wk 2.
+- OCSF validator: current `py-ocsf-models` releases (≥0.5.0) target OCSF 1.5.0. ADR 0007 locks 1.3.0. Resolve at wk 2 spike — default path is hand-rolled Pydantic v2 for Detection Finding (class_uid 2004).
+- OpenRouter fallback: canonical request uses `"models": [primary, ...fallbacks]` array alone. Drop `"route": "fallback"` reference in ADR 0004 / wk 2 code unless verification shows otherwise.
 
 _(etc.)_
