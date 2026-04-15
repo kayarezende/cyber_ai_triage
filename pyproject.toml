@@ -15,6 +15,7 @@ members = [
     "apps/orchestrator",
     "apps/worker",
     "mcp/splunk",
+    "libs/common",
     "libs/ocsf",
 ]
 
