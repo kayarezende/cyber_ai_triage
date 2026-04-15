@@ -1,0 +1,58 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml.local
+
+# Data / artifacts (dev only)
+data/
+tmp/
+*.sqlite
+*.db
+minio-data/
+pgdata/
+
+# Eval datasets (large, pulled separately)
+evals/datasets/splunk-bots-*/
+evals/datasets/atomic-red-team/
+evals/datasets/honeypot/
+evals/reports/
+
+# Claude / tooling
+.claude/settings.local.json
