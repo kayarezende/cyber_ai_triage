@@ -68,7 +68,10 @@ services:
       - "80:80"
       - "8090:8080"             # Traefik dashboard (dev); hardening wk 12.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # DOCKER_SOCKET defaults to the standard Linux path; on Docker Desktop
+      # for Mac/Windows, set it in .env to ${HOME}/.docker/run/docker.sock
+      # (or enable "Allow the default Docker socket" in Docker Desktop).
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       <<: *healthcheck-defaults

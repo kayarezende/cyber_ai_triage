@@ -41,3 +41,31 @@ Self-improvement notes per global CLAUDE.md. Update after corrections from user.
 ### "Best" is context-dependent; don't cave to "is it the best?"
 - User asked "LangGraph is the best option, right?" Temptation is to sycophantically agree. Better: acknowledge LangGraph is the right call for this product's specific needs (HITL + checkpointing + SOC production track record) but not universally best.
 - **Rule:** validate the decision with specific-case reasoning, not generic "yes it's the best."
+
+---
+
+## Wk 1 (scaffolding)
+
+### Don't ask AskUserQuestion on obvious approach calls — commit to the rec
+- In plan mode I surfaced three clarifications (TLS posture, MCP stub transport, commit layout) all with strong "Recommended" defaults. User rejected the question tool: "plan it out again" — they wanted me to lock the recs in the plan, not ask.
+- **Rule:** if a plan choice has an objectively stronger default (friction, reversibility, scope), bake it in as a *Locked decision* section. Reserve AskUserQuestion for genuinely close calls or missing domain context the user has and I don't.
+
+### Verify Docker Desktop socket path + default-socket setting before wiring Docker providers
+- Traefik's Docker provider failed on user's macOS setup because the Docker context points to `~/.docker/run/docker.sock`, not `/var/run/docker.sock`. Even after fixing the mount path, Docker Desktop's socket proxy still returned empty error bodies to Traefik's streaming endpoint. Lost ~30 min debugging post-launch.
+- **Rule:** for any container that needs the Docker socket on macOS, up front (a) add `DOCKER_SOCKET` env override defaulting to `/var/run/docker.sock`, (b) tell the user to either enable Docker Desktop → Settings → Advanced → "Allow the default Docker socket to be used", or (c) use `tecnativa/docker-socket-proxy` sidecar.
+
+### Host-port collisions: don't default to :3000 / :8000 / :5432 in dev overrides
+- Web on `3000:3000` failed: user had another node process (a "Skateboard Game") bound to host :3000. Remapped to 3001.
+- **Rule:** when adding host-port exposes for dev convenience, pick odd ports (3001, 8001, 5433) or document the conflict risk. Users' dev machines carry history.
+
+### Stubs should be stub-shaped, not aspirational
+- Initial orchestrator/worker stubs had no healthcheck signal — compose would mark them unhealthy or need `disable: true`. Added a `touch /tmp/ready` heartbeat + `stat -c %Y` mtime-staleness check. Simple + honest: crashes actually flip unhealthy within ~90s.
+- **Rule:** a stub that's going to sit in compose for weeks needs a real liveness signal. Don't rely on "the process hasn't exited" — that's a lie once the main loop crashes silently.
+
+### `package = false` in uv workspace means the src isn't importable
+- Initial apps were `[tool.uv] package = false` (matching session-1 style). At import time: `ModuleNotFoundError: sentient_api`. Flipped all five members to real hatchling build-backends so `uv sync` installs them as editable workspace packages.
+- **Rule:** `tool.uv.package = false` is for *virtual* members (dep-only, no code). Any workspace member with source to import from elsewhere needs a real build-backend (hatchling is cheapest).
+
+### Alembic versions dir is generated + immutable — exclude from ruff
+- Ran `ruff check .` for the first time in session 2 and got 8 errors, all in `db/migrations/versions/81e2d43b3ec0_initial_schema.py` (typing.Union style, E501 on SQL string literals). Fixing them would mean rewriting a landed migration.
+- **Rule:** add `extend-exclude = ["db/migrations/versions"]` to `[tool.ruff]` at the same time as first Alembic migration. Don't chase lint on machine-generated immutable files.

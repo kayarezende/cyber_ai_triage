@@ -71,7 +71,16 @@ services:
       - --reload-dir
       - /app/libs/common/src
 
-  # Web dev mode is intentionally not overridden here: `next dev` in-container
-  # requires node_modules to be resolvable, and the production Dockerfile
-  # ships only the .next/standalone artefact. For frontend hot-reload, run
-  # `npm run dev` on the host against a locally-running api + orchestrator.
+  web:
+    # Direct host port — lets you bypass Traefik entirely.
+    # Handy on Docker Desktop for Mac where the Docker-socket provider
+    # sometimes can't enumerate containers. Hit http://localhost:3001/.
+    # (3001 not 3000 because local dev machines often have something else
+    # already on 3000 — adjust freely per-dev.)
+    ports:
+      - "3001:3000"
+  # Web dev mode (`next dev` + bind-mount + hot reload) is intentionally not
+  # overridden here: the production Dockerfile ships only the
+  # .next/standalone artefact — no node_modules in the runtime image. For
+  # frontend hot-reload, run `npm run dev` on the host against a locally-
+  # running api + orchestrator.

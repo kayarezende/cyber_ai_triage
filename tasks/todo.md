@@ -429,12 +429,27 @@ _Session 2 (2026-04-16 / 17): full stack + libs/common + MITRE seed + splunk-set
 - [x] `docker compose up` brings up empty-but-healthy stack. _Full stack: postgres + redis + minio + traefik + api + orchestrator + worker + mcp-splunk + web._
 
 **Wk 2 — MCP SIEM server v1 + framework validation**
-- [ ] Python MCP server (`mcp` official SDK) exposing `siem_query`, `siem_get_notable` backed by Splunk.
-- [ ] Splunk client: `splunk-sdk-python` Service for search jobs + auth/session.
+
+_Session-start prereqs (founder-run before Claude touches wk 2 code):_
+
+- [ ] Fill `.env` real values: `SPLUNK_HOST`, `SPLUNK_TOKEN`, `SPLUNK_HEC_HOST`, `SPLUNK_HEC_TOKEN`, `OPENROUTER_API_KEY`, `LANGSMITH_API_KEY` (must start `ls__`), then flip `LANGSMITH_TRACING=true`.
+- [ ] BOTS v3 loaded on Splunk box per `docs/splunk-setup.md` §6 (required for the `siem_query` / `siem_get_notable` unit tests).
+- [ ] Network reachability from docker host: both `${SPLUNK_HOST}:8089` and `${SPLUNK_HEC_HOST}:8088` respond (`docs/splunk-setup.md` §8).
+
+_Carry-over from wk 1 (non-blocking; resolve opportunistically):_
+
+- [ ] Traefik Docker-provider doesn't read container labels on Docker Desktop for Mac. Pick one fix: (a) Docker Desktop → Settings → Advanced → enable "Allow the default Docker socket to be used", then `docker compose restart traefik`; or (b) add `tecnativa/docker-socket-proxy` sidecar. Host ports in `docker-compose.override.yml` currently work around it.
+- [ ] `splunk-sdk` (PyPI) — update `CLAUDE.md` + `docs/context/stack-locks.md` when the dep lands (currently both say `splunk-sdk-python`).
+
+_Wk 2 work:_
+
+- [ ] Python MCP server (`mcp` official SDK) exposing `siem_query`, `siem_get_notable` backed by Splunk — replaces the `/health`-only FastAPI stub at `mcp/splunk/src/sentient_mcp_splunk/main.py`. Pick real MCP transport (stdio vs SSE/HTTP) now that real tools land.
+- [ ] Splunk client: `splunk-sdk` Service for search jobs + auth/session.
 - [ ] Pydantic tool-contract schemas + golden tests.
 - [ ] Unit tests against local Splunk (BOTS data loaded wk 1).
 - [ ] **Verify: LangGraph + ChatOpenAI-pointed-at-OpenRouter + `langchain-mcp-adapters` + `PostgresSaver` all integrate.** Minimal graph with one tool call + checkpoint round-trip, visible in LangSmith.
 - [ ] **Verify: OpenRouter structured output + tool_use passthrough** with Gemini 3 Flash.
+- [ ] OCSF 1.3.0 validator library spike: try `py-ocsf-models` vs hand-rolled Pydantic v2 for Detection Finding (class_uid 2004). Lock choice in ADR update.
 
 **Wk 3 — OCSF normalization layer**
 - [ ] Splunk notable → OCSF 1.3.0 Detection Finding mapper.
