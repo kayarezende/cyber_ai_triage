@@ -413,19 +413,20 @@ Per investigation, write to MinIO:
 
 **Wk 1 — Scaffolding + data + observability**
 
-_Session 1 (2026-04-15 / 16): uv workspace + infra compose + Alembic + checkpointer landed. Commits `ccd090d`, `dffdbed`._
+_Session 1 (2026-04-15 / 16): uv workspace + infra compose + Alembic + checkpointer landed. Commits `ccd090d`, `dffdbed`, `ab9eee8`._
+_Session 2 (2026-04-16 / 17): full stack + libs/common + MITRE seed + splunk-setup doc landed. Closes Wk 1._
 
 - [x] Repo layout + `.gitignore`, `README.md` stub.
-- [~] `docker-compose.yml` with all service stubs building + starting. _Infra only (postgres, redis, minio) — app service stubs deferred to session 2._
+- [x] `docker-compose.yml` with all service stubs building + starting.
 - [x] Postgres + Alembic + initial migration (all tables above).
 - [x] `langgraph-checkpoint-postgres` `setup()` — checkpointer tables created.
-- [ ] Seed MITRE STIX → `mitre_techniques` table.
-- [ ] **Load Splunk BOTS v3 into local Splunk.**
-- [ ] `structlog` → stdout JSON wired in all services.
-- [ ] Dev bypass auth flag (`DEV_BYPASS_AUTH=1`) in FastAPI + Next.js middleware.
-- [~] Fernet key generation + `.env.example` documented. _Env var + inline generate command documented; `libs/crypto.py` helper pending session 2._
-- [~] LangSmith project + API key wired. _Env vars in `.env.example`; orchestrator import/init pending session 2._
-- [~] `docker compose up` brings up empty-but-healthy stack. _Infra subset healthy; full stack pending session 2 app stubs._
+- [x] Seed MITRE STIX → `mitre_techniques` table. _691 techniques; idempotent upsert seeder at `db/seeds/seed_mitre.py`._
+- [x] **Load Splunk BOTS v3 into local Splunk.** _Documented in `docs/splunk-setup.md` §6; founder-run on Splunk box._
+- [x] `structlog` → stdout JSON wired in all services. _Via `sentient_common.logging.configure_logging`._
+- [x] Dev bypass auth flag (`DEV_BYPASS_AUTH=1`) in FastAPI + Next.js middleware.
+- [x] Fernet key generation + `.env.example` documented. _Helper at `libs/common/src/sentient_common/crypto.py` with tamper + missing-env tests._
+- [x] LangSmith project + API key wired. _`apps/orchestrator/src/sentient_orchestrator/tracing.py` gates on `LANGSMITH_TRACING` + `ls__`-prefixed key._
+- [x] `docker compose up` brings up empty-but-healthy stack. _Full stack: postgres + redis + minio + traefik + api + orchestrator + worker + mcp-splunk + web._
 
 **Wk 2 — MCP SIEM server v1 + framework validation**
 - [ ] Python MCP server (`mcp` official SDK) exposing `siem_query`, `siem_get_notable` backed by Splunk.
@@ -569,4 +570,37 @@ Decisions surfaced for later resolution:
 - OCSF validator: current `py-ocsf-models` releases (≥0.5.0) target OCSF 1.5.0. ADR 0007 locks 1.3.0. Resolve at wk 2 spike — default path is hand-rolled Pydantic v2 for Detection Finding (class_uid 2004).
 - OpenRouter fallback: canonical request uses `"models": [primary, ...fallbacks]` array alone. Drop `"route": "fallback"` reference in ADR 0004 / wk 2 code unless verification shows otherwise.
 
-_(etc.)_
+**Session 2 (2026-04-16 / 17) — close-out.**
+
+Landed (commits `a0c2301`, `cefe405`, `81177af`, plus this commit):
+
+- `libs/common` uv workspace package `sentient-common` (hatchling build-backend + `py.typed`). Two modules:
+  - `logging.configure_logging(service, level)` — structlog processors (`TimeStamper iso UTC`, `add_log_level`, `add_logger_name`, `JSONRenderer`) with stdlib bridge via `ProcessorFormatter` so uvicorn / redis-py / etc. render as the same JSON shape. `service=<name>` injected on every record.
+  - `crypto.encrypt`/`decrypt` — Fernet wrapper reading `TENANT_SECRET_KEY`, fails loud on missing/invalid key (ADR 0012).
+  - 7 tests pass (round-trip, unicode, tamper, missing-env, invalid-env, JSON-shape, stdlib-bridge).
+- Five app service stubs — each with `sentient_common.configure_logging` at import time, its own `pyproject.toml` with real deps + `sentient-common` workspace source, and a multi-stage Dockerfile (uv in builder stage only; runtime `.venv/bin/*` exec-form CMD):
+  - `apps/api` — FastAPI + `DevBypassAuthMiddleware` (ADR 0011, 501 on non-allowlisted routes when flag off) + `/health` router. Lifespan-based startup log.
+  - `apps/orchestrator` — stub main loop + `tracing.init_tracing()` gated on `LANGSMITH_TRACING=true` AND key starting with `ls__` (refuses `CHANGEME_*` placeholder, never boot-kills on LangSmith failure). Sentinel heartbeat (`/tmp/ready`, 30s cadence) for Docker healthcheck.
+  - `apps/worker` — redis `BLPOP sentient:jobs:investigations` loop, same sentinel pattern. `BLPOP` return `cast`ed to satisfy mypy strict.
+  - `mcp/splunk` — FastAPI `/health` stub only. Real MCP tools + transport pick (stdio vs SSE) land wk 2.
+  - `apps/web` — dev-bypass `middleware.ts` injecting `x-dev-user` header, `next.config.ts output=standalone`, multi-stage node:20-alpine Dockerfile.
+- Apps + mcp-splunk flipped from `package=false` to real hatchling build-backends so uv installs them as editable workspace members (required for `sentient_api.main` etc. to be importable at runtime). `libs/ocsf` will need the same flip in wk 3.
+- Full `docker-compose.yml`: added `traefik:v3.1` (HTTP-only on :80, dashboard :8090 dev-only) + five app services. Host routing: `app.triage.local` → web:3000, `api.triage.local` → api:8000. Healthcheck anchor + `depends_on: condition: service_healthy` gates everywhere.
+- `docker-compose.override.yml`: host-port exposes (5432, 6379, 9000/9001, 8000, 8080), bind-mounts of `src/` dirs, `--reload` on api + mcp-splunk. Web dev-mode intentionally left on the host (standalone image has no node_modules).
+- `db/seeds/seed_mitre.py`: fetches `enterprise-attack.json` from `mitre-attack/attack-stix-data` (cached under `db/seeds/cache/`, gitignored), upserts via `ON CONFLICT (technique_id) DO UPDATE`. Re-uses the `_load_dotenv` + SQLAlchemy→psycopg DSN-strip pattern from `setup_checkpointer.py`. Current load: **691 techniques**. Idempotent second run confirmed. Spot-check: `T1059.001` PowerShell, `T1071` Application Layer Protocol, `T1486` Data Encrypted for Impact.
+- `docs/splunk-setup.md`: founder runbook — target versions, indexes (`main`, `botsv3`, `triage_verdicts`), HEC token, service account + `sentient_triage_role`, saved-search webhook stub, BOTS v3 manual-load steps, `notable_update` verification curl, network reachability checks, TLS-deferred note.
+- `README.md`: quickstart updated with `/etc/hosts` entries, `uv sync --all-packages`, MITRE seed step, curl smoke checks, TLS note.
+- `pyproject.toml` root: added `libs/common` workspace member; ruff `extend-exclude = ["db/migrations/versions"]` (Alembic migrations are immutable + contain long SQL strings).
+- `.gitignore`: added `db/seeds/cache/`.
+
+Verified end-to-end: `uv run ruff check .` clean; `uv run mypy apps libs mcp` clean on 20 source files; `uv run pytest libs/common/tests -q` 7 passed; `docker compose config` validates; MITRE seeder idempotent at 691 rows against the live compose postgres.
+
+Decisions surfaced for later resolution (carry from session 1 + added this session):
+
+- (carry) `splunk-sdk` PyPI name — apply wk 2 when dep lands.
+- (carry) OCSF 1.3.0 validator library choice — wk 2 spike.
+- (carry) OpenRouter fallback request syntax — wk 2 verify.
+- (new) `libs/ocsf/pyproject.toml` still has `package = false`; flip to hatchling build-backend when wk 3 imports it from the orchestrator.
+- (new) Dev-user tenant UUID is a fixed literal in `apps/api/src/sentient_api/settings.py` (`DEV_TENANT_ID`) — wire it to a real seeded row in `tenants` when wk 4 ingest path lands.
+
+Carry-over to wk 2: none. Wk 1 is done.
