@@ -33,6 +33,11 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Alembic migrations are (mostly) generated + contain long SQL strings;
+# lint enforcement would force churn on landed, immutable files.
+extend-exclude = [
+    "db/migrations/versions",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N"]
