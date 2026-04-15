@@ -58,5 +58,8 @@ evals/datasets/atomic-red-team/
 evals/datasets/honeypot/
 evals/reports/
 
+# Seed caches (re-fetchable from upstream)
+db/seeds/cache/
+
 # Claude / tooling
 .claude/settings.local.json

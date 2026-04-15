@@ -1,5 +1,20 @@
-# Sentient Layer — Session 1 infra only (postgres, redis, minio).
-# App services (api, orchestrator, worker, mcp-splunk, web) + Traefik land in session 2+.
+# Sentient Layer — full MVP stack (wk 1 Session 2).
+#
+# Infra: postgres, redis, minio.
+# Edge:  traefik (HTTP-only local dev; TLS wk 12 hardening).
+# Apps:  api, orchestrator, worker, mcp-splunk, web.
+#
+# Local hostnames — add to /etc/hosts once:
+#   127.0.0.1  app.triage.local  api.triage.local
+#
+# docker-compose.override.yml adds bind-mounts + host-port exposes + --reload
+# for dev. Skip it with `-f docker-compose.yml` for a prod-ish smoke.
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 10s
+  timeout: 5s
+  retries: 6
+  start_period: 20s
 
 services:
   postgres:
@@ -8,29 +23,23 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-sentient}
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-sentient}"]
+      <<: *healthcheck-defaults
       interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      <<: *healthcheck-defaults
       interval: 5s
       timeout: 3s
-      retries: 10
     restart: unless-stopped
 
   minio:
@@ -39,17 +48,120 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     volumes:
       - miniodata:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 10s
+      <<: *healthcheck-defaults
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.1
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"   # dashboard on :8090 — dev only; disabled wk 12.
+      - "--ping=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8090:8080"             # Traefik dashboard (dev); hardening wk 12.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      <<: *healthcheck-defaults
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      REDIS_URL: redis://redis:6379/0
+      TENANT_SECRET_KEY: ${TENANT_SECRET_KEY:?TENANT_SECRET_KEY must be set in .env}
+      DEV_BYPASS_AUTH: ${DEV_BYPASS_AUTH:-1}
+      DEV_USER_EMAIL: ${DEV_USER_EMAIL:-dev@sentientlayer.ai}
+      INGEST_WEBHOOK_SECRET: ${INGEST_WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.triage.local`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: apps/orchestrator/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      REDIS_URL: redis://redis:6379/0
+      TENANT_SECRET_KEY: ${TENANT_SECRET_KEY:?TENANT_SECRET_KEY must be set in .env}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-sentient-layer-dev}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mcp-splunk:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      TENANT_SECRET_KEY: ${TENANT_SECRET_KEY:?TENANT_SECRET_KEY must be set in .env}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mcp-splunk:
+    build:
+      context: .
+      dockerfile: mcp/splunk/Dockerfile
+    environment:
+      SPLUNK_HOST: ${SPLUNK_HOST:-splunk.internal}
+      SPLUNK_PORT: ${SPLUNK_PORT:-8089}
+      SPLUNK_TOKEN: ${SPLUNK_TOKEN:-}
+      SPLUNK_HEC_HOST: ${SPLUNK_HEC_HOST:-splunk.internal}
+      SPLUNK_HEC_PORT: ${SPLUNK_HEC_PORT:-8088}
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-}
+      SPLUNK_VERIFY_TLS: ${SPLUNK_VERIFY_TLS:-true}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      DEV_BYPASS_AUTH: ${DEV_BYPASS_AUTH:-1}
+      DEV_USER_EMAIL: ${DEV_USER_EMAIL:-dev@sentientlayer.ai}
+      NEXT_PUBLIC_API_URL: http://api.triage.local
+    depends_on:
+      api:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=Host(`app.triage.local`)"
+      - "traefik.http.routers.web.entrypoints=web"
+      - "traefik.http.services.web.loadbalancer.server.port=3000"
     restart: unless-stopped
 
 volumes:

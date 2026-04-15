@@ -31,22 +31,41 @@ Scaffolding in progress. See `tasks/todo.md` for week-by-week milestones.
 ```bash
 # 1. Configure environment
 cp .env.example .env
-# Edit .env: TENANT_SECRET_KEY (generate Fernet key), SPLUNK_*, OPENROUTER_API_KEY, LANGSMITH_API_KEY
+# Generate Fernet key into .env:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Then edit .env: TENANT_SECRET_KEY, SPLUNK_*, OPENROUTER_API_KEY, LANGSMITH_API_KEY
 
-# 2. Install Python deps
-uv sync
+# 2. Add local hostnames (one-time)
+sudo sh -c 'echo "127.0.0.1 app.triage.local api.triage.local" >> /etc/hosts'
 
-# 3. Start infrastructure
-docker compose up -d
+# 3. Install Python deps (host-side, for migrations + seeds)
+uv sync --all-packages
 
-# 4. Run database migrations (from host)
+# 4. Bring up the full stack
+docker compose up -d --build
+
+# 5. Run database migrations (from host, against the compose postgres)
 uv run alembic upgrade head
 
-# 5. Create LangGraph checkpointer tables
+# 6. Create LangGraph checkpointer tables (not Alembic-managed)
 uv run python db/seeds/setup_checkpointer.py
+
+# 7. Seed MITRE ATT&CK techniques
+uv run python db/seeds/seed_mitre.py
+
+# 8. Verify
+curl http://api.triage.local/health   # → {"status":"ok","service":"api"}
+curl -I http://app.triage.local/      # → 200 OK
+docker compose ps                     # → every service healthy
 ```
 
-> **Note:** Alembic manages the app schema. The 4 LangGraph checkpointer tables (`checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`) are created by `langgraph-checkpoint-postgres` via `setup_checkpointer.py` — they are **not** managed by Alembic.
+> **Note:** Alembic manages the app schema. The 4 LangGraph checkpointer tables
+> (`checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`)
+> are created by `langgraph-checkpoint-postgres` via `setup_checkpointer.py` —
+> they are **not** managed by Alembic.
+
+> **TLS:** Traefik serves HTTP only in MVP local dev. TLS hardening (self-signed
+> cert or internal CA + `/etc/hosts` + app.triage.local trust) lands wk 12.
 
 ## Layout
 

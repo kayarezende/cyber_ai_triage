@@ -1,0 +1,77 @@
+# Dev overrides — auto-merged by `docker compose` when present.
+# Skip with `docker compose -f docker-compose.yml ...` for a prod-ish smoke.
+#
+# Adds:
+#   - host-port exposes so devs can bypass Traefik while debugging
+#   - bind-mounted source for hot-reload
+#   - --reload / `next dev` CMDs
+#
+# Bind-mount strategy: mount only the source directories (not the whole app
+# dir) so the image's baked .venv + Dockerfile artefacts stay in place.
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  api:
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./apps/api/src:/app/apps/api/src
+      - ./libs/common/src:/app/libs/common/src
+    command:
+      - /app/.venv/bin/uvicorn
+      - sentient_api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/apps/api/src
+      - --reload-dir
+      - /app/libs/common/src
+
+  orchestrator:
+    volumes:
+      - ./apps/orchestrator/src:/app/apps/orchestrator/src
+      - ./libs/common/src:/app/libs/common/src
+
+  worker:
+    volumes:
+      - ./apps/worker/src:/app/apps/worker/src
+      - ./libs/common/src:/app/libs/common/src
+
+  mcp-splunk:
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./mcp/splunk/src:/app/mcp/splunk/src
+      - ./libs/common/src:/app/libs/common/src
+    command:
+      - /app/.venv/bin/uvicorn
+      - sentient_mcp_splunk.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --reload
+      - --reload-dir
+      - /app/mcp/splunk/src
+      - --reload-dir
+      - /app/libs/common/src
+
+  # Web dev mode is intentionally not overridden here: `next dev` in-container
+  # requires node_modules to be resolvable, and the production Dockerfile
+  # ships only the .next/standalone artefact. For frontend hot-reload, run
+  # `npm run dev` on the host against a locally-running api + orchestrator.
