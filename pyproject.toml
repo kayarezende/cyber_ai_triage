@@ -1,0 +1,50 @@
+[project]
+name = "sentient-layer"
+version = "0.0.1"
+description = "Sovereign AI SOC triage platform — Splunk-first MVP"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "apps/api",
+    "apps/orchestrator",
+    "apps/worker",
+    "mcp/splunk",
+    "libs/ocsf",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.5",
+    "black>=24",
+    "mypy>=1.10",
+    "pytest>=8",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "langgraph-checkpoint-postgres>=3.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "apps", "mcp", "libs"]

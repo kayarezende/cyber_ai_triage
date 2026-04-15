@@ -1,0 +1,9 @@
+[project]
+name = "sentient-api"
+version = "0.0.1"
+description = "FastAPI REST + webhook layer"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false

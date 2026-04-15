@@ -1,0 +1,9 @@
+[project]
+name = "sentient-orchestrator"
+version = "0.0.1"
+description = "LangGraph agent runner"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false

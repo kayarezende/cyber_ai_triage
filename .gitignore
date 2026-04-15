@@ -18,6 +18,10 @@ __pycache__/
 venv/
 env/
 
+# uv
+# Note: uv.lock IS committed (this is an application, not a library)
+.uv-cache/
+
 # Node / Next.js
 node_modules/
 .next/

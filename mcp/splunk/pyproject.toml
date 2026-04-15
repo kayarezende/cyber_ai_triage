@@ -1,0 +1,9 @@
+[project]
+name = "sentient-mcp-splunk"
+version = "0.0.1"
+description = "MCP server exposing generic siem_* tools backed by Splunk"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
