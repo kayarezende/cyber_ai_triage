@@ -24,7 +24,7 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 | Sentinel connector | Wk 10-14 or post-MVP. |
 | Future SIEMs | CrowdStrike Falcon, Defender XDR — month 4-6+. |
 | MCP tool names | Generic (`siem_query`, `siem_get_notable`) so agent prompts are SIEM-agnostic. |
-| Splunk client | `splunk-sdk-python` for search + ES endpoints via low-level `service.post()`. `httpx` for HEC (different port, different auth). |
+| Splunk client | `splunk-sdk` (PyPI) for search + ES endpoints via low-level `service.post()`. `httpx` for HEC (different port, different auth). |
 | Writeback | Dual: `notable_update` REST (enriches original notable in ES) + HEC post to `triage_verdicts` index. |
 | Enrichment | Splunk-native only for MVP. VT/AbuseIPDB/GreyNoise deferred month 4. |
 

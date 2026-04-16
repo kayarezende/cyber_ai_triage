@@ -19,7 +19,6 @@ An AI SOC analyst that ingests SIEM notable events, investigates autonomously wi
 |---|---|---|
 | Deployment | Single `docker-compose.yml`, one host | Split control/data plane when first external customer onboards |
 | SIEM MVP | Splunk on-prem | Sentinel wk 10-14 |
-| LLM routing (hybrid) | **Tier 1 Haiku via OpenRouter** (pinned to `anthropic/claude-*`) + **Tier 2 Opus via Anthropic direct** | Bedrock Sydney = config-flag upgrade path for sovereignty |
 | Backend languages | Python (agent, API, worker, MCP) | N/A |
 | Frontend | Next.js 15 + Tailwind (minimal TS surface) | N/A |
 | Agent framework | **LangGraph** + `langchain-anthropic` + `langchain-mcp-adapters` + `langgraph-checkpoint-postgres`. Agent tracing via **LangSmith**. | N/A |
@@ -31,7 +30,7 @@ An AI SOC analyst that ingests SIEM notable events, investigates autonomously wi
 | Object store | MinIO (S3-compatible) | Real S3 + Object Lock in prod |
 | Proxy | Traefik | N/A |
 | Auth | **Dev bypass only for MVP**. Entra ID SSO → wk 11 pre-demo | N/A |
-| Splunk client | `splunk-sdk-python` for search + ES endpoints via low-level `service.post()`. `httpx` for HEC (different port, different auth) | N/A |
+| Splunk client | `splunk-sdk` (PyPI) for search + ES endpoints via low-level `service.post()`. `httpx` for HEC (different port, different auth) | N/A |
 | Enrichment | Splunk-native only | VT/AbuseIPDB/GreyNoise month 4 |
 | Writeback | **Dual**: `notable_update` REST (enriches original notable in ES) + HEC post to `triage_verdicts` index | N/A |
 | Standards | MITRE ATT&CK (STIX cache) + **OCSF 1.3.0** | N/A |

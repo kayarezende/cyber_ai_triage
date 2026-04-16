@@ -309,7 +309,7 @@ tools = [
 - Auth: Splunk service account token per tenant (`splunk-sdk` Service), HEC token per tenant (httpx header).
 - Pydantic tool-contract schemas + golden tests to catch drift.
 - Every tool call logged to `audit_log` with args + sha256 of result payload.
-- Splunk client: `splunk-sdk-python` for search jobs + ES endpoints via `service.post()`. `httpx` for HEC.
+- Splunk client: `splunk-sdk` (PyPI) for search jobs + ES endpoints via `service.post()`. `httpx` for HEC.
 
 ---
 
@@ -439,7 +439,7 @@ _Session-start prereqs (founder-run before Claude touches wk 2 code):_
 _Carry-over from wk 1 (non-blocking; resolve opportunistically):_
 
 - [ ] Traefik Docker-provider doesn't read container labels on Docker Desktop for Mac. Pick one fix: (a) Docker Desktop → Settings → Advanced → enable "Allow the default Docker socket to be used", then `docker compose restart traefik`; or (b) add `tecnativa/docker-socket-proxy` sidecar. Host ports in `docker-compose.override.yml` currently work around it.
-- [ ] `splunk-sdk` (PyPI) — update `CLAUDE.md` + `docs/context/stack-locks.md` when the dep lands (currently both say `splunk-sdk-python`).
+- [x] `splunk-sdk` (PyPI) — update `CLAUDE.md` + `docs/context/stack-locks.md` when the dep lands (currently both say `splunk-sdk-python`). _Done wk 2 Step 0; also removed stale "hybrid" LLM routing row from CLAUDE.md that contradicted ADR 0004._
 
 _Wk 2 work:_
 
