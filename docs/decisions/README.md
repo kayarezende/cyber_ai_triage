@@ -60,14 +60,18 @@ What costs do we accept? What do we gain? What becomes harder?
 | 0001 | [Single Docker Compose topology for MVP](0001-single-docker-compose-mvp-topology.md) | Accepted |
 | 0002 | [Splunk-first, SIEM-agnostic MCP abstraction](0002-splunk-first-siem-agnostic-mcp.md) | Accepted |
 | 0003 | [LangGraph as the agent framework](0003-langgraph-agent-framework.md) | Accepted |
-| 0004 | [OpenRouter as unified LLM routing](0004-openrouter-unified-llm-routing.md) | Accepted |
+| 0004 | [OpenRouter as unified LLM routing](0004-openrouter-unified-llm-routing.md) | Accepted (fallback §4 superseded by 0015) |
 | 0005 | [Python backend, Next.js frontend](0005-python-backend-nextjs-frontend.md) | Accepted |
 | 0006 | [Soft multi-tenancy via Postgres RLS](0006-soft-multi-tenancy-rls.md) | Accepted |
 | 0007 | [OCSF 1.3.0 + MITRE ATT&CK as enforced standards](0007-ocsf-and-mitre-standards.md) | Accepted |
-| 0008 | [Dual Splunk writeback (HEC + notable_update)](0008-dual-splunk-writeback.md) | Accepted |
+| 0008 | [Dual Splunk writeback (HEC + notable_update)](0008-dual-splunk-writeback.md) | Accepted (refined by 0018) |
 | 0009 | [JSONB-based HITL rules engine](0009-jsonb-hitl-rules-engine.md) | Accepted |
-| 0010 | [Per-role LLM configuration](0010-per-role-llm-configuration.md) | Accepted |
+| 0010 | [Per-role LLM configuration](0010-per-role-llm-configuration.md) | Accepted (fallback §3 superseded by 0015) |
 | 0011 | [Dev-bypass auth for MVP, Entra SSO in wk 11](0011-dev-bypass-auth-mvp-entra-wk11.md) | Accepted |
 | 0012 | [Fernet-based secret encryption](0012-fernet-secret-encryption.md) | Accepted |
 | 0013 | [LangSmith + structlog for observability](0013-langsmith-observability.md) | Accepted |
 | 0014 | [Shared-secret webhook auth for MVP](0014-shared-secret-webhook-auth.md) | Accepted |
+| 0015 | [App-side LLM fallback loop](0015-app-side-llm-fallback.md) | Accepted (supersedes 0004 §4) |
+| 0016 | [Sovereignty hybrid surface — drop MVP claim, prepare DB](0016-sovereignty-mode-hybrid.md) | Accepted |
+| 0017 | [Hash-chained audit log + DB role split](0017-audit-hash-chain.md) | Accepted |
+| 0018 | [Splunk writeback mode (`dual` vs `hec_only`)](0018-splunk-writeback-mode.md) | Accepted (refines 0008) |

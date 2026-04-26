@@ -24,9 +24,9 @@
 - Prompt caching on system + incident + MITRE blocks.
 
 ### LLM routing (per-role, configurable)
-- Admin-panel config per role: primary model + fallback chain + max_tokens + timeout.
-- OpenRouter native fallback (request-level, no code).
-- Per-call usage logged to `usage` table with attempt status.
+- Admin-panel config per role: primary model + fallback chain + max_tokens + timeout + temperature.
+- **App-side fallback loop** (try primary → catch error → log per-attempt usage row → try next). Drops OpenRouter native `models[]`. See ADR-0015.
+- Per-attempt row in `usage` table (`attempt_num`, `model_requested`, `model_used`, status enum, latency, tokens, cost). Failure mid-loop still leaves audit trail.
 
 ### HITL
 - LangGraph `interrupt()` at `await_approval` node.
@@ -34,16 +34,19 @@
 - Analyst approves from web UI → graph resumes.
 
 ### Writeback
-- Dual: `notable_update` REST (attaches verdict to original notable in Splunk ES) + HEC to `triage_verdicts` index.
-- OCSF Detection Finding format.
+- Per-tenant `writeback_mode` config (`dual` | `hec_only`). See ADR-0018.
+- `dual` (Splunk ES tenants): `notable_update` REST attaches verdict to original notable + HEC post to `triage_verdicts` index.
+- `hec_only` (plain Splunk Enterprise tenants — default): HEC post only. `notable_update` is no-op (returns `mode=skipped`). Analyst sees verdict in Sentient Layer UI only.
+- OCSF Detection Finding format on both writeback paths.
 
 ### Standards
 - MITRE ATT&CK STIX cache seeded on build.
 - OCSF 1.3.0 schema enforced in + out.
 
 ### Storage
-- Postgres 16 with soft multi-tenancy (tenant_id + RLS).
-- MinIO for evidence artifacts + raw Splunk payloads.
+- Postgres 16 with soft multi-tenancy (tenant_id + RLS, `WITH CHECK` on all tenant-scoped tables, `IS NULL OR ...` on global-capable tables — see Phase 2 migration).
+- Hash-chained `audit_log` (`previous_hash` + `hash_scope`) with `audit_writer` DB role split + UPDATE/DELETE-blocking triggers. See ADR-0017.
+- MinIO with Object Lock + versioning enabled at bucket creation, for evidence artifacts + raw Splunk payloads.
 - Redis for investigation job queue.
 - Unlimited retention in MVP.
 
@@ -54,9 +57,10 @@
 ### Web UI (Next.js 15)
 - Investigation detail page: verdict, reasoning trace, evidence chain, MITRE matrix heatmap.
 - Approval UI (resumes LangGraph thread).
-- Audit log explorer (filterable).
-- Time-travel replay (LangGraph checkpointer exposed).
-- **Admin panel**: LLM role config, HITL policies, concurrency, budgets, Splunk creds, users, usage dashboard.
+- Audit log explorer (filterable, hash-chain integrity verifiable).
+- Time-travel replay (full step-by-step scrubber over LangGraph checkpoints).
+- **Admin panel (MVP scope)**: tenant management (Splunk host/tokens/HEC token, Entra config), LLM credentials (master OpenRouter key + per-tenant BYO override columns surfaced when sovereign-mode lands), per-role LLM config (primary model + fallback chain dropdown + max_tokens + timeout + temperature), budget caps (per-investigation + monthly), users, usage dashboard.
+- **Admin panel (post-MVP)**: HITL drag-drop rule builder (MVP uses raw JSONB editor + seed rows), detection-rule editor (MVP uses seed rows), white-label theming, sovereign-mode toggles in admin UI (DB columns present from MVP, UI exposure post-MVP).
 
 ### Observability
 - `structlog` JSON to stdout.
@@ -85,12 +89,13 @@
 | Multi-agent (specialist agents: phishing, insider, ransomware) | Month 6+ |
 | HMAC signature webhook auth | Post-MVP |
 | Per-tenant API tokens for Splunk ingestion | Post-MVP |
-| Admin UI for HITL rule building | Post-MVP (JSONB editor in MVP) |
+| Admin UI for HITL rule building (drag-drop) | Post-MVP (raw JSONB editor + seed rows in MVP) |
+| Admin UI for detection-rule editing | Post-MVP (seed rows in MVP) |
 | Automated secret rotation | Post-MVP |
 | Kubernetes / ECS / Terraform | Post paying customer |
 | Split control/data plane topology | Post first external customer |
 | Loki / Grafana / Prometheus observability | Post-MVP |
-| Bedrock Sydney LLM routing for sovereignty | Post-MVP (config flag exists) |
+| Sovereign-mode tier (Bedrock Sydney / Azure AU East routing, LangSmith off, BYO LLM keys) | Post-MVP. **DB surface present from MVP** (per-tenant `byo_*_key_encrypted`, `llm_region_constraint`, `langsmith_enabled` columns). Activation = feature flag + admin UI. See ADR-0016. |
 
 ---
 

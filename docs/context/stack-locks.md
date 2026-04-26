@@ -1,6 +1,6 @@
 # Stack Locks — Current State
 
-**Last updated:** 2026-04-15
+**Last updated:** 2026-04-27
 
 Snapshot of current architectural commitments. Immutable reasoning for each is in `docs/decisions/` (ADRs). Update this file when a lock changes; do not rewrite ADRs.
 
@@ -21,14 +21,16 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 | Area | Lock |
 |---|---|
 | SIEM MVP | Splunk on-prem (founder's own). |
+| Splunk product tier | Splunk Enterprise (base) supported via `hec_only` writeback. Splunk Enterprise Security (ES) required for `dual` writeback (`notable_update` REST). Per-tenant `writeback_mode` config. See ADR-0018. |
+| Founder tenant default | `writeback_mode='hec_only'` until ES install confirmed. Switch to `dual` if/when ES is installed. |
 | Sentinel connector | Wk 10-14 or post-MVP. |
 | Future SIEMs | CrowdStrike Falcon, Defender XDR — month 4-6+. |
 | MCP tool names | Generic (`siem_query`, `siem_get_notable`) so agent prompts are SIEM-agnostic. |
 | Splunk client | `splunk-sdk` (PyPI) for search + ES endpoints via low-level `service.post()`. `httpx` for HEC (different port, different auth). |
-| Writeback | Dual: `notable_update` REST (enriches original notable in ES) + HEC post to `triage_verdicts` index. |
+| Writeback | `dual` mode (ES tenants): `notable_update` REST + HEC. `hec_only` mode (base Splunk): HEC only; `notable_update` is a no-op. |
 | Enrichment | Splunk-native only for MVP. VT/AbuseIPDB/GreyNoise deferred month 4. |
 
-→ See ADR 0002, 0008
+→ See ADR 0002, 0008, 0018
 
 ## Agent framework
 
@@ -49,12 +51,12 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 | Per-role config | Admin panel configures `primary_model` + `fallback_chain[]` + caps per role. |
 | Roles active MVP | `triage`, `investigation`, `review`. |
 | Roles defined but disabled MVP | `summarize`, `entity_extraction`. |
-| Fallback mechanism | OpenRouter native (`"route": "fallback"`, list of models in request). No fallback logic in our code. |
-| Prompt caching | Aggressive — system + incident payload + MITRE context. 5-6x cost cut per investigation. |
-| MVP dev default model | `google/gemini-3-flash-preview` (cheap, fast, good-enough for testing). |
-| Production default | `anthropic/claude-opus-4-6` for investigation; `anthropic/claude-haiku-4-5` for triage. |
+| Fallback mechanism | **App-side fallback loop** (try primary → catch error → log per-attempt usage row → try next). Drops OpenRouter native `models[]`. See ADR-0015. |
+| Prompt caching | Aggressive — system + incident payload + MITRE context. **Hit rate is an eval target wk 7, not a budget assumption** (OpenRouter passthrough has provider/TTL/sticky-routing caveats). |
+| MVP dev default | `google/gemini-3-flash-preview` (cheap, fast, good-enough for testing). Set in `llm_role_config` seed rows; admin-overridable per tenant. |
+| Production defaults | `anthropic/claude-opus-4-7` (investigation), `anthropic/claude-sonnet-4-6` (review), `anthropic/claude-haiku-4-5` (triage). All seed-row defaults; not hardcoded constants. Bump via new seed rows or admin UI, not doc edits. |
 
-→ See ADR 0004, 0010
+→ See ADR 0004, 0010, 0015
 
 ## Languages + frameworks
 
@@ -107,10 +109,11 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 | Area | Lock |
 |---|---|
 | App logs | `structlog` → stdout JSON. Docker captures. |
-| Agent tracing | LangSmith (SaaS). |
+| Agent tracing | LangSmith (SaaS). Per-tenant `langsmith_enabled` flag — sovereign-mode tenants disable. |
 | Platform metrics | None in MVP. Loki/Grafana/Prometheus post-MVP. |
+| Audit log | Hash-chained append-only Postgres table. `previous_hash` + `hash_scope` per row. DB role split (`audit_writer` INSERT-only) + triggers blocking UPDATE/DELETE. MinIO Object Lock for evidence artifacts. See ADR-0017. |
 
-→ See ADR 0013
+→ See ADR 0013, 0017
 
 ## HITL (human-in-loop)
 
@@ -139,6 +142,16 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 |---|---|
 | MVP | Manual Docker image tag pin in compose. Customer-controlled. |
 | Post-MVP | Admin UI approved minor auto-updates; month 4+. |
+
+## Sovereignty
+
+| Area | Lock |
+|---|---|
+| MVP positioning | **Not sovereign.** Routes through OpenRouter (US) + LangSmith SaaS (US). Marketed as "Australian-built, sovereignty-roadmapped." |
+| Sovereign-mode tier | Post-MVP paid tier. Activates per-tenant via existing DB columns: `byo_openrouter_key_encrypted`, `byo_anthropic_key_encrypted`, `llm_region_constraint`, `langsmith_enabled`. Adds Bedrock Sydney + Azure AU East provider routes to `LLMRouter`. See ADR-0016. |
+| MVP DB surface | All sovereign-mode columns present in `tenants` table from day 1 (dormant). Activation = feature flag, not a migration. |
+
+→ See ADR 0016
 
 ## Testing
 

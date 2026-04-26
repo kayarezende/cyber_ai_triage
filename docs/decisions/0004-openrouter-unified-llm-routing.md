@@ -1,7 +1,7 @@
 # 0004: OpenRouter as unified LLM routing
 
 Date: 2026-04-15
-Status: Accepted
+Status: Accepted (fallback mechanism superseded by ADR-0015 on 2026-04-27)
 
 ## Context
 

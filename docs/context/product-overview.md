@@ -1,24 +1,26 @@
 # Product Overview — Sentient Layer
 
 **Company:** Sentient Layer (domain: `sentientlayer.ai`)
-**Product:** Sovereign AI SOC triage platform.
+**Product:** Australian-built AI SOC triage platform. Sovereignty-roadmapped (post-MVP paid tier).
 **Working dir:** `/Users/kaya/github/cyber-ai-triage` (to be renamed as brand solidifies).
 
 ---
 
 ## One-line positioning
 
-"The only AI SOC analyst built in Australia, for Australian compliance — running in your tenant, never leaving sovereign infrastructure."
+"Australian-built AI SOC analyst — Splunk-first, OCSF-native, audit-complete."
+
+A separately-priced **sovereign-mode tier** ships post-MVP for sovereignty-sensitive tenants (BYO Bedrock Sydney / Azure AU East routing, LangSmith disabled, customer-supplied LLM keys). MVP is **not sovereign** — routes through OpenRouter (US) + LangSmith SaaS. The DB surface for sovereign-mode is in place from MVP day 1 (per ADR-0016) so activation is a feature flag, not a migration.
 
 ## What we do
 
-AI SOC analyst that ingests SIEM notable events, investigates autonomously with Claude (or configurable LLM) + MCP tools over a LangGraph state machine, and writes an OCSF Detection Finding (verdict, confidence, MITRE ATT&CK mapping, evidence chain) back to the SIEM so the human analyst sees an enriched notable inline in their existing tool.
+AI SOC analyst that ingests SIEM notable events, investigates autonomously with Claude (or configurable LLM via OpenRouter) + MCP tools over a LangGraph state machine, and writes an OCSF Detection Finding (verdict, confidence, MITRE ATT&CK mapping, evidence chain) back to the SIEM so the human analyst sees an enriched notable inline in their existing tool (when Splunk ES is installed; otherwise verdict surfaces in Sentient Layer UI only — see ADR-0018).
 
 ## Wedge priorities (in order)
 
-1. **Sovereignty** — AU data residency, no cross-border inference for paid customers; self-host path available.
-2. **Compliance-native** — Essential Eight ML2 mapping, APRA CPS 234 alignment, audit-complete per-action logging, evidentiary chain-of-custody.
-3. **MSSP multi-tenancy** — hard tenant isolation by month 6, channel-friendly pricing, white-label by month 9.
+1. **Australian-built** — AU support, AU pricing, AU customer-success ownership. Sovereignty path via the post-MVP sovereign-mode tier (ADR-0016).
+2. **Compliance-native** — Essential Eight ML2 mapping, APRA CPS 234 alignment, hash-chained audit log (ADR-0017), evidentiary chain-of-custody.
+3. **MSSP multi-tenancy** — soft isolation MVP, hard tenant isolation by month 6, channel-friendly pricing, white-label by month 9.
 4. **SIEM-agnostic** — Splunk first (MVP), Sentinel wk 10-14, CrowdStrike/Defender XDR month 6+. Generic MCP tool names mean agent prompts don't change per SIEM.
 
 ## ICP prioritization
@@ -44,10 +46,10 @@ AI SOC analyst that ingests SIEM notable events, investigates autonomously with 
 
 ## Competitive moat (in order)
 
-1. Compliance-native sovereignty (AU-HQ, IRAP roadmap, self-host available).
-2. MSSP channel depth (hard tenant isolation, white-label, revenue share).
-3. Investigation quality (prompt engineering + golden-set evals + detection-rule post-pass).
-4. **Not the LLM.** Claude is an accelerant, swappable via admin panel.
+1. Australian-built + compliance-native (AU-HQ, IRAP-roadmapped, sovereign-mode tier post-MVP).
+2. MSSP channel depth (hard tenant isolation month 6, white-label month 9, revenue share).
+3. Investigation quality (prompt engineering + golden-set evals + detection-rule post-pass + per-attempt audit ledger).
+4. **Not the LLM.** Claude/Gemini are accelerants, swappable via admin panel per role config.
 
 ## Pointers
 

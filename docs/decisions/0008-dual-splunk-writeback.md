@@ -1,7 +1,7 @@
 # 0008: Dual Splunk writeback (HEC + notable_update)
 
 Date: 2026-04-15
-Status: Accepted
+Status: Accepted (refined by ADR-0018 on 2026-04-27 — adds `writeback_mode` config so non-ES tenants get `hec_only` mode rather than the dual writeback assumed here)
 
 ## Context
 

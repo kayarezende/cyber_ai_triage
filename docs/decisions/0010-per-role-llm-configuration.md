@@ -1,7 +1,7 @@
 # 0010: Per-role LLM configuration
 
 Date: 2026-04-15
-Status: Accepted
+Status: Accepted (fallback mechanism superseded by ADR-0015 on 2026-04-27 — the per-role config table stays; the OpenRouter native fallback in §3 is replaced by an app-side loop)
 
 ## Context
 

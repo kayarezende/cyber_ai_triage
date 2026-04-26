@@ -16,12 +16,12 @@ For reasoning behind each, see `docs/decisions/` (ADRs). For current state, see 
 |---|---|---|
 | **Deployment** | Single `docker-compose.yml` on founder's Splunk server. | 0001 |
 | **SIEM MVP** | Splunk on-prem. Generic MCP tool names (`siem_*`). Sentinel wk 10-14 / post-MVP. | 0002 |
-| **Agent framework** | LangGraph + langchain-anthropic + langchain-mcp-adapters + langgraph-checkpoint-postgres. | 0003 |
-| **LLM routing** | OpenRouter all tiers. Per-role config. Native fallback chains. MVP dev default `google/gemini-3-flash-preview`. | 0004, 0010 |
+| **Agent framework** | LangGraph + langchain-mcp-adapters + langgraph-checkpoint-postgres. LLM via custom `LLMRouter` (not langchain-anthropic) so app-side fallback owns logging. | 0003, 0015 |
+| **LLM routing** | OpenRouter all tiers. Per-role config. **App-side fallback loop** (per-attempt audit ledger). MVP dev default `google/gemini-3-flash-preview`. | 0004, 0010, 0015 |
 | **Languages** | Python 3.12 backend (agent, API, worker, MCP). Next.js 15 + TS frontend only. | 0005 |
 | **Multi-tenancy** | Soft — `tenant_id` column + Postgres RLS. Hard tenancy deferred month 6. | 0006 |
 | **Standards** | OCSF 1.3.0 + MITRE ATT&CK enforced end-to-end. | 0007 |
-| **Writeback** | Dual: `siem_notable_update` REST + `siem_hec_post` to `triage_verdicts` index. | 0008 |
+| **Writeback** | Per-tenant `writeback_mode`. `dual` (ES tenants): `siem_notable_update` REST + `siem_hec_post`. `hec_only` (base Splunk, default): HEC only; `notable_update` is no-op. | 0008, 0018 |
 | **HITL** | JSONB rule engine (`hitl_policies`). MVP default = 100% human approval. LangGraph `interrupt()`. | 0009 |
 | **Auth** | Dev bypass MVP (`DEV_BYPASS_AUTH=1`). Entra SSO wk 11. | 0011 |
 | **Secret encryption** | Fernet via env-var `TENANT_SECRET_KEY`. | 0012 |
@@ -39,12 +39,14 @@ For reasoning behind each, see `docs/decisions/` (ADRs). For current state, see 
 | Role | MVP status | MVP dev model | Production default (admin-settable) | Purpose |
 |---|---|---|---|---|
 | `triage` | **active** | `google/gemini-3-flash-preview` | `anthropic/claude-haiku-4-5` | Tier 1 classification (one-shot, no tools) |
-| `investigation` | **active** | `google/gemini-3-flash-preview` | `anthropic/claude-opus-4-6` | Tier 2 agent loop (LangGraph + MCP tools) |
+| `investigation` | **active** | `google/gemini-3-flash-preview` | `anthropic/claude-opus-4-7` | Tier 2 agent loop (LangGraph + MCP tools) |
 | `review` | **active** | `google/gemini-3-flash-preview` | `anthropic/claude-sonnet-4-6` | Critic on draft verdict before HITL |
 | `summarize` | defined, disabled | — | `anthropic/claude-haiku-4-5` | Human-readable summary for Splunk + UI (post-MVP) |
 | `entity_extraction` | defined, disabled | — | `anthropic/claude-haiku-4-5` | OCSF normalization assist (post-MVP) |
 
-Each row has: `primary_model`, `fallback_chain[]`, `max_tokens`, `temperature`, `timeout_seconds`, `enabled`. OpenRouter native fallback handles model retry.
+Production defaults are *seed-row defaults*, not hardcoded. Bump via new seed rows or admin UI (no doc edit required).
+
+Each row has: `primary_model`, `fallback_chain[]`, `max_tokens`, `temperature`, `timeout_seconds`, `enabled`. **App-side fallback loop** (`apps/orchestrator/src/llm/router.py`) iterates `[primary, *fallback_chain]` and logs each attempt to `usage` table. See ADR-0015.
 
 ---
 
@@ -156,6 +158,14 @@ CREATE TABLE tenants (
   max_concurrent_investigations INT DEFAULT 5,
   monthly_llm_budget_usd NUMERIC(10,2),
   per_investigation_budget_usd NUMERIC(10,4),
+  -- Splunk writeback mode (ADR-0018). Default 'hec_only' (works on plain Splunk Enterprise).
+  -- Tenants with Splunk ES installed flip to 'dual' for inline notable_update.
+  writeback_mode TEXT CHECK (writeback_mode IN ('dual','hec_only')) DEFAULT 'hec_only',
+  -- Sovereignty hybrid surface (ADR-0016). Dormant in MVP; activated when sovereign-mode tier ships.
+  byo_openrouter_key_encrypted BYTEA,    -- if set, used instead of master key
+  byo_anthropic_key_encrypted BYTEA,     -- for direct Anthropic routing post-MVP
+  llm_region_constraint TEXT,            -- 'au-southeast' | 'us-east' | NULL=any
+  langsmith_enabled BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -215,7 +225,7 @@ CREATE TABLE investigations (
   inconclusive_reason TEXT               -- nullable; populated when fallback chain exhausted
 );
 
--- Append-only audit log
+-- Hash-chained append-only audit log (ADR-0017)
 CREATE TABLE audit_log (
   id BIGSERIAL PRIMARY KEY,
   tenant_id UUID,
@@ -223,20 +233,24 @@ CREATE TABLE audit_log (
   actor TEXT,                            -- user email | 'system' | 'agent:role'
   action TEXT,                           -- llm_call | tool_call | user_approve | ingest | role_config_change
   details JSONB,
-  content_hash TEXT,
+  content_hash TEXT,                     -- computed by BEFORE INSERT trigger
+  previous_hash TEXT,                    -- chain pointer; computed by trigger
+  hash_scope TEXT,                       -- chain partition: 'investigation:<uuid>' | 'tenant:<uuid>'
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
--- REVOKE UPDATE, DELETE on audit_log; INSERT only.
+-- BEFORE INSERT trigger computes content_hash + previous_hash from prior row in same hash_scope.
+-- BEFORE UPDATE/DELETE triggers raise exception ('audit_log is append-only').
+-- audit_writer DB role: GRANT INSERT, SELECT only. App role inherits.
 
--- LLM usage for chargeback (logs each attempt, including failures)
+-- LLM usage for chargeback. App-side fallback loop logs each attempt, including failures (ADR-0015).
 CREATE TABLE usage (
   id BIGSERIAL PRIMARY KEY,
   tenant_id UUID,
   investigation_id UUID,
   role TEXT,                             -- which role made the call
-  attempt_num INT,                       -- 1 = primary, 2+ = fallback
+  attempt_num INT,                       -- 1 = primary, 2+ = fallback (loop in apps/orchestrator/src/llm/router.py)
   model_requested TEXT,                  -- what we asked for
-  model_used TEXT,                       -- what OpenRouter served
+  model_used TEXT,                       -- what OpenRouter served (matches model_requested for explicit single-model calls)
   status TEXT CHECK (status IN ('success','timeout','5xx','validation_fail','rate_limited')),
   input_tokens INT,
   output_tokens INT,
@@ -283,10 +297,20 @@ CREATE TABLE hitl_policies (
 
 -- LangGraph checkpointer tables (created by PostgresSaver.setup())
 
--- RLS (repeat for all tenant-scoped tables)
+-- RLS — strict policy (USING + WITH CHECK) for tenant-only tables
+-- Applied to: users, llm_role_config, incidents, investigations, audit_log, usage
 ALTER TABLE incidents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON incidents
-  USING (tenant_id = current_setting('app.current_tenant')::uuid);
+  USING (tenant_id = current_setting('app.current_tenant', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant', true)::uuid);
+
+-- RLS — global-capable policy for tables where tenant_id IS NULL means global
+-- Applied to: detection_rules, hitl_policies
+-- USING allows reads of global rows; WITH CHECK is strict so app-role can't INSERT global rows.
+ALTER TABLE detection_rules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON detection_rules
+  USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant', true)::uuid);
 ```
 
 ---
@@ -465,8 +489,8 @@ _Wk 2 work:_
 
 **Wk 5 — Per-role LLM config + Triage**
 - [ ] Seed `llm_role_config` with 5 rows per tenant (3 enabled, 2 disabled).
-- [ ] OpenRouter client wrapper: takes role, looks up config, builds request with `"models": [primary, *fallback]`.
-- [ ] Usage tracker logs every attempt (success/failure) with latency + cost.
+- [ ] **`LLMRouter` wrapper** at `apps/orchestrator/src/llm/router.py`: takes role config, iterates `[primary, *fallback_chain]`, single-model OpenRouter call per attempt, catches timeout / 5xx / 429 / validation errors, logs per-attempt row to `usage`, raises `FallbackChainExhausted` when all fail. Per ADR-0015. Sovereignty hooks consume `tenants.byo_*_key_encrypted`, `llm_region_constraint`, `langsmith_enabled` (dormant in MVP).
+- [ ] Usage tracker logs every attempt (success/failure) with latency + cost + cached_tokens.
 - [ ] Tier 1 classification prompt with OCSF input.
 - [ ] Pydantic-validated output; 1 retry on schema fail within attempt.
 - [ ] Low/info verdicts auto-close without Tier 2.
@@ -583,7 +607,7 @@ Deferred to session 2 (still Wk 1 scope): MITRE STIX seeder, shared `libs/` util
 Decisions surfaced for later resolution:
 - Dep name fix: `splunk-sdk` (PyPI), not `splunk-sdk-python` as written in CLAUDE.md / stack-locks. Update when adding the dep in wk 2.
 - OCSF validator: current `py-ocsf-models` releases (≥0.5.0) target OCSF 1.5.0. ADR 0007 locks 1.3.0. Resolve at wk 2 spike — default path is hand-rolled Pydantic v2 for Detection Finding (class_uid 2004).
-- OpenRouter fallback: canonical request uses `"models": [primary, ...fallbacks]` array alone. Drop `"route": "fallback"` reference in ADR 0004 / wk 2 code unless verification shows otherwise.
+- OpenRouter fallback: resolved 2026-04-27. Verified `route: fallback` is deprecated; canonical syntax is `models[]` array. **However, decision flipped to app-side fallback loop instead** — see ADR-0015. Per-attempt audit ledger requires per-attempt logging which OpenRouter native doesn't expose. Wk 5 wrapper (`apps/orchestrator/src/llm/router.py`) implements explicit single-model calls + retry loop.
 
 **Session 2 (2026-04-16 / 17) — close-out.**
 
@@ -614,7 +638,7 @@ Decisions surfaced for later resolution (carry from session 1 + added this sessi
 
 - (carry) `splunk-sdk` PyPI name — apply wk 2 when dep lands.
 - (carry) OCSF 1.3.0 validator library choice — wk 2 spike.
-- (carry) OpenRouter fallback request syntax — wk 2 verify.
+- (carry → resolved 2026-04-27) OpenRouter fallback syntax verified; flipped decision to app-side fallback loop. See ADR-0015.
 - (new) `libs/ocsf/pyproject.toml` still has `package = false`; flip to hatchling build-backend when wk 3 imports it from the orchestrator.
 - (new) Dev-user tenant UUID is a fixed literal in `apps/api/src/sentient_api/settings.py` (`DEV_TENANT_ID`) — wire it to a real seeded row in `tenants` when wk 4 ingest path lands.
 

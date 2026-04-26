@@ -1,7 +1,7 @@
 [project]
 name = "sentient-layer"
 version = "0.0.1"
-description = "Sovereign AI SOC triage platform — Splunk-first MVP"
+description = "Australian-built AI SOC triage platform — Splunk-first MVP"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
@@ -28,6 +28,7 @@ dev = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "langgraph-checkpoint-postgres>=3.0",
+    "minio>=7.2",  # used by db/seeds/setup_minio.py to create evidence bucket with Object Lock
 ]
 
 [tool.ruff]

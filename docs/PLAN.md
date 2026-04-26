@@ -1,27 +1,33 @@
-# Plan: Sovereign AI SOC Triage for Australian MSSP + Mid-Market
+# Plan: Sentient Layer — AI SOC Triage for Australian MSSP + Mid-Market
+
+**Domain:** `sentientlayer.ai`
+**MVP wedge:** Splunk on-prem triage agent (founder's own Splunk box = dev environment + design partner #0).
+**Future SIEMs:** Microsoft Sentinel wk 10-14 / post-MVP. CrowdStrike + Defender XDR month 4-6+.
 
 ## Context
 
-**The problem.** AU orgs drown in SIEM/EDR alerts. ISC2 2025: 95% report material skills gaps; SOC analysts burn out (70% of juniors quit <3yr). Microsoft/Omdia 2026: 46% of alerts are false positives. IBM 2025: global avg breach cost USD 4.44M. Regulatory pressure climbing: SOCI Act, APRA CPS 234/230, Essential Eight ML2 mandatory for 98 Commonwealth entities, Privacy Act penalties up to A$50M. Post-Optus/Medibank, AU buyers want sovereignty.
+**The problem.** AU orgs drown in SIEM/EDR alerts. ISC2 2025: 95% report material skills gaps; SOC analysts burn out (70% of juniors quit <3yr). Microsoft/Omdia 2026: 46% of alerts are false positives. IBM 2025: global avg breach cost USD 4.44M. Regulatory pressure climbing: SOCI Act, APRA CPS 234/230, Essential Eight ML2 mandatory for 98 Commonwealth entities, Privacy Act penalties up to A$50M. Post-Optus/Medibank, AU buyers want Australian-built tooling and a credible sovereignty story.
 
-**Why now.** AI SOC category is at Gartner's Peak of Inflated Expectations (2025) — category real, already commoditizing. Dropzone ($37M B, 11x ARR), Prophet ($30M A), 7AI ($130M A, largest cyber A in history) have US enterprise. **No credible AU-HQ AI SOC product exists.** Microsoft Security Copilot is free with M365 E5 — existential threat to horizontal US-facing plays, non-threat to sovereign AU MSSP channel.
+**Why now.** AI SOC category is at Gartner's Peak of Inflated Expectations (2025) — category real, already commoditizing. Dropzone ($37M B, 11x ARR), Prophet ($30M A), 7AI ($130M A, largest cyber A in history) have US enterprise. **No credible AU-HQ AI SOC product exists.** Microsoft Security Copilot is free with M365 E5 — existential threat to horizontal US-facing plays, non-threat to AU MSSP channel.
 
 **Why this founder.** SOC operator + AI/ML engineer = rare wedge. Can build MVP solo or lean, sell credibly to MSSPs, bootstrap under 12 months.
 
-**Intended outcome.** Within 12 months, 2-3 paid AU MSSP pilots + 1-2 direct AU mid-market customers on Microsoft Sentinel AI triage agent, with compliance-native posture (Essential Eight-aligned, data sovereign, audit-complete) positioned to win sovereignty-sensitive deals US vendors can't serve.
+**Intended outcome.** Within 12 months, 2-3 paid AU MSSP pilots + 1-2 direct AU mid-market customers on Splunk-first triage agent (Sentinel connector deferred wk 10-14), with compliance-native posture (Essential Eight-aligned, audit-complete hash-chained logging) positioned to win sovereignty-sensitive deals via a separately-priced sovereign-mode tier post-MVP.
 
 ---
 
 ## Strategy
 
 ### Positioning
-**"The only AI SOC analyst built in Australia, for Australian compliance — running in your tenant, never leaving sovereign infrastructure."**
+**"Australian-built AI SOC analyst — Splunk-first, OCSF-native, audit-complete."**
+
+A separately-priced **sovereign-mode tier** (BYO Bedrock Sydney / Azure AU East routing, LangSmith disabled, customer-supplied LLM keys, region-constrained provider routing) ships post-MVP for sovereignty-sensitive tenants. **MVP is not sovereign** — it routes through OpenRouter (US infrastructure) and LangSmith SaaS for tracing. The DB surface for sovereign-mode is in place from MVP day 1 (per-tenant BYO key columns + region constraint + langsmith toggle), so activation is a feature flag, not a migration.
 
 Wedge stack (in priority):
-1. **Sovereignty** — AU data residency, no cross-border inference, model hosted in AWS Sydney or Azure Australia East (IRAP-certified regions).
-2. **Compliance-native** — Essential Eight ML2 mapping, APRA CPS 234 alignment, audit-complete per-action logging, evidentiary chain-of-custody for post-incident review.
-3. **MSSP multi-tenancy** — hard tenant isolation from day 1, channel-friendly pricing, white-label option by month 9.
-4. **Microsoft Sentinel-first** — dominant AU stack, aligns with E8 ML2, largest deployed footprint in Commonwealth and large enterprise.
+1. **Australian-built** — Sentient Layer Pty Ltd, AU support, AU pricing, AU customer-success ownership. Path to sovereignty via the sovereign-mode tier. See ADR-0016.
+2. **Compliance-native** — Essential Eight ML2 mapping, APRA CPS 234 alignment, hash-chained audit log (see ADR-0017), evidentiary chain-of-custody for post-incident review.
+3. **MSSP multi-tenancy** — soft tenant isolation MVP (`tenant_id` + RLS), hard isolation month 6, channel-friendly pricing, white-label option month 9.
+4. **Splunk-first wedge** — founder's own Splunk Enterprise box = dev environment. AU MSSP market still heavily Splunk-deployed. Sentinel connector ships wk 10-14 (largest AU enterprise footprint).
 
 ### What we are NOT doing
 - Not competing horizontally with Dropzone on US mid-market. They've won that race.
@@ -29,6 +35,7 @@ Wedge stack (in priority):
 - Not doing consumer. Research shows graveyard economics.
 - Not pursuing IRAP PROTECTED certification in year 1 (A$150-300K + 6-9mo). Design for it; pursue with first paying government-adjacent customer co-funding.
 - Not selling to Tier-1 MSSPs (CyberCX, Telstra Purple) in year 1 — 9-12mo procurement kills bootstrap.
+- **Not claiming sovereignty in MVP.** OpenRouter (US) + LangSmith SaaS (US) are MVP defaults. Sovereign-mode tier ships post-MVP as a paid feature with BYO Bedrock Sydney / Azure AU East routing + LangSmith off + BYO keys.
 
 ### ICP prioritization
 **Primary: Tier-2/3 AU MSSPs** — Sekuro, Content Security, Shearwater, Triskele Labs, Bitwise, Gridware, Jaarvis. These need differentiation vs. CyberCX, have faster decision cycles, will co-build, and bring compounding customer exposure.
@@ -38,23 +45,27 @@ Wedge stack (in priority):
 
 ## Product (MVP scope)
 
-### Core: Microsoft Sentinel AI triage agent
-Input: Sentinel incident (via Graph Security API or Logic App webhook).
-Output: decision-ready investigation report (verdict, confidence, evidence chain, suggested actions, MITRE ATT&CK mapping).
+### Core: Splunk on-prem AI triage agent
+Input: Splunk notable event (via saved-search alert action → webhook to `/api/incidents/ingest`).
+Output: OCSF Detection Finding (verdict, confidence, MITRE ATT&CK mapping, evidence chain, suggested actions) written back to Splunk via dual writeback (HEC + ES `notable_update` when ES installed; `hec_only` mode when not — see ADR-0018).
 
-**MVP capabilities (ship in 12 weeks):**
-1. **Ingest & enrich** — pull incident + entities (IPs, users, hosts, files) from Sentinel. Enrich with KQL queries against the customer's Sentinel workspace, plus public threat intel (VirusTotal, AbuseIPDB, GreyNoise free tiers initially).
-2. **Autonomous investigation** — agent plans investigation (LLM reasoner) → runs KQL + API queries (MCP-style tools) → correlates → produces verdict.
-3. **Evidence & audit** — every tool call, query, LLM prompt/response logged immutably. Exportable as forensic timeline.
-4. **Human-in-loop** — all actions gated. No auto-response in MVP. Analyst approves or rejects.
-5. **MSSP multi-tenancy** — per-customer workspace isolation, per-customer model routing, hard data boundaries.
+**MVP capabilities (ship in ~13 weeks + 2 buffer):**
+1. **Ingest & enrich** — pull notable + entities (IPs, users, hosts, files) from Splunk via SDK. Splunk-native enrichment only via ad-hoc SPL through MCP tools. Public threat intel (VT/AbuseIPDB/GreyNoise) deferred to month 4.
+2. **Autonomous investigation** — multi-role LLM pipeline (triage → investigation → review). Investigation role is LangGraph multi-turn with MCP tools. Per-role model config (primary + fallback chain) configurable in admin panel. App-side fallback loop with per-attempt audit ledger (see ADR-0015).
+3. **Evidence & audit** — every tool call, LLM call, user action logged to hash-chained `audit_log` table. Append-only via DB role split + triggers (see ADR-0017). MinIO Object Lock for evidence artifacts.
+4. **Human-in-loop** — all actions gated by LangGraph `interrupt()`. MVP default = 100% human approval. JSONB `hitl_policies` rule engine. No auto-response in MVP.
+5. **MSSP multi-tenancy** — soft isolation MVP via `tenant_id` + Postgres RLS. Per-tenant LLM config + budget caps + Splunk creds. Hard isolation deferred month 6.
 
 **Deferred (post-MVP):**
-- CrowdStrike Falcon connector (month 6)
-- Microsoft Defender XDR alerts (month 4 — same Graph API)
-- Phishing/BEC specialized flow (month 7)
-- Auto-response / containment (month 9, opt-in)
-- White-label branding (month 9)
+- Microsoft Sentinel connector (wk 10-14 / post-MVP).
+- CrowdStrike Falcon connector (month 4-6).
+- Microsoft Defender XDR alerts (month 4-6).
+- Public threat intel enrichment (VT, AbuseIPDB, GreyNoise) (month 4).
+- Sovereign-mode tier (Bedrock Sydney / Azure AU East routing, LangSmith off, BYO LLM keys) — DB surface present from MVP, runtime ships post-MVP.
+- Phishing/BEC specialized agent (month 7).
+- Auto-response / containment (month 9, opt-in).
+- White-label branding (month 9).
+- HITL drag-drop rule builder UI (post-MVP — MVP uses JSONB editor + seed rows).
 
 ---
 
@@ -63,25 +74,24 @@ Output: decision-ready investigation report (verdict, confidence, evidence chain
 **Deployment model for MVP**: everything runs in Docker Compose. Single `docker-compose.yml` brings up the whole stack on a laptop or any VM. No cloud lock-in, no infra cost, no Terraform yet. Same containers later deploy to AWS Sydney (ECS/Fargate) or customer's own infra — which is itself a selling point for sovereignty-conscious buyers who want self-host.
 
 **Containers (services in docker-compose.yml):**
-- `orchestrator` — Python, LangGraph StateGraph + `langchain-mcp-adapters` + MCP tool clients. Stateful via Postgres checkpointer; HITL via `interrupt()`. Handles investigation planning + execution.
-- `web` — Next.js frontend. Investigation viewer, tenant admin, audit log explorer.
-- `api` — Thin REST/GraphQL layer between `web` and `orchestrator`. Auth, tenant scoping, rate limiting.
-- `postgres` — tenants, users, investigation metadata, audit log index.
+- `orchestrator` — Python, LangGraph StateGraph + `langchain-mcp-adapters` + MCP tool clients. Stateful via Postgres checkpointer; HITL via `interrupt()`. Handles investigation planning + execution + app-side LLM fallback loop.
+- `web` — Next.js 15 + Tailwind frontend. Investigation viewer (verdict + reasoning trace + evidence chain + step replay), tenant admin (creds + LLM config + budgets + usage), audit log explorer.
+- `api` — Thin FastAPI layer between `web` and `orchestrator`. Auth, tenant scoping, rate limiting.
+- `postgres` — Postgres 16. Tenants, users, investigation metadata, hash-chained audit log, per-attempt LLM usage, per-role LLM config, HITL policies, MITRE technique cache, detection rules.
 - `redis` — job queue (investigations are async), prompt cache keys, rate limits.
-- `minio` — S3-compatible object store for audit logs, investigation artifacts, evidence bundles. Swap to real S3 + Object Lock in production.
-- `mcp-sentinel` — MCP server wrapping Microsoft Graph + Sentinel KQL. Isolated container per tenant via compose profiles in dev; in prod, process-level isolation.
-- `mcp-enrich` — MCP server for VirusTotal / AbuseIPDB / GreyNoise.
+- `minio` — S3-compatible object store with Object Lock + versioning enabled at bucket creation. Audit log artifacts, investigation evidence bundles, raw Splunk payloads. Swap to real S3 + Object Lock in production.
+- `mcp-splunk` — MCP server wrapping `splunk-sdk` (PyPI) for search + ES endpoints + `httpx` for HEC. Generic SIEM-agnostic tool names (`siem_query`, `siem_get_notable`, `siem_notable_update`, `siem_hec_post`).
 - `worker` — background investigation runner pulling jobs from redis.
-- `traefik` or `caddy` — reverse proxy, TLS termination for local hostnames.
+- `traefik` — reverse proxy, TLS termination for local hostnames (`app.triage.local`, `api.triage.local`).
 
 **Stack:**
-- **LLM**: Anthropic Claude (Opus 4.6 for investigation reasoning, Haiku 4.5 for triage classification). Prompt caching aggressively — multi-turn investigations cache-hit the incident context. No customer data to OpenAI (positioning + Anthropic has AU data residency roadmap).
-- **Hosting**: Docker Compose locally and on a single VPS/EC2 for pilot customers. Migrate to AWS Sydney (ap-southeast-2, IRAP-assessed) when first customer requires it — same containers, ECS task definitions generated from the compose file.
-- **Data**: Customer Sentinel data stays in customer's tenant. We orchestrate via Graph API from our control plane. We store only: investigation metadata, audit logs, our own prompts/responses. Encrypted at rest (Postgres pgcrypto + MinIO SSE).
-- **Agent framework**: LangGraph + `langchain-anthropic` + `langchain-mcp-adapters` + `langgraph-checkpoint-postgres`. Chosen for native HITL `interrupt()`, resumable investigations via Postgres checkpointer, and multi-agent runway for month 6+ specialists.
-- **Frontend**: Next.js + Tailwind.
-- **Auth**: Entra ID SSO + SCIM (required by enterprise customers).
-- **Compliance primitives from day 1**: per-tenant encryption keys, append-only audit log table (Postgres + MinIO Object Lock equivalent), SOC2 controls wired, Essential Eight mapping doc.
+- **LLM**: OpenRouter for all roles + all tiers. Per-role config (primary model + fallback chain + max_tokens + timeout) in `llm_role_config` table. App-side fallback loop logs each attempt to `usage` table (see ADR-0015). MVP dev default `google/gemini-3-flash-preview`. Prod defaults: `anthropic/claude-opus-4-7` (investigation), `anthropic/claude-sonnet-4-6` (review), `anthropic/claude-haiku-4-5` (triage) — all admin-overridable via per-role config rows. Prompt caching aggressively pursued; cache hit rate is an eval target wk 7, not a budget assumption (OpenRouter passthrough has provider/TTL/sticky-routing caveats).
+- **Hosting**: Docker Compose locally + on founder's on-prem Splunk box for MVP. Migrate to AWS Sydney (ap-southeast-2) or customer-hosted when first paying customer requires it — same containers, ECS task definitions or customer-tenant install.
+- **Data**: Customer Splunk data stays in customer's Splunk. We orchestrate via Splunk SDK from our control plane (founder's box for MVP). We store only: investigation metadata, hash-chained audit logs, our own prompts/responses. Encrypted at rest (Fernet via `TENANT_SECRET_KEY` for tenant secrets in Postgres; MinIO SSE for object store).
+- **Agent framework**: LangGraph + `langchain-mcp-adapters` + `langgraph-checkpoint-postgres`. Chosen for native HITL `interrupt()`, resumable investigations via Postgres checkpointer, and multi-agent runway for month 6+ specialists. LLM calls go through our `LLMRouter` wrapper (not `langchain-anthropic`) so the app-side fallback loop owns per-attempt logging.
+- **Frontend**: Next.js 15 + Tailwind. App Router. Server components default. Strict TS.
+- **Auth**: Dev bypass (`DEV_BYPASS_AUTH=1`) MVP. Entra ID SSO wk 11. SCIM is post-MVP.
+- **Compliance primitives from day 1**: per-tenant encrypted Splunk + HEC tokens, hash-chained audit log with `previous_hash` + `hash_scope` + DB role split (see ADR-0017), MinIO Object Lock for evidence artifacts, Essential Eight mapping doc (wk 13).
 
 **Why Docker Compose is the right bootstrap call:**
 - Zero cloud cost during 12-month runway. Runs on founder's laptop or a A$20/mo Hetzner box for demos.
@@ -90,19 +100,19 @@ Output: decision-ready investigation report (verdict, confidence, evidence chain
 - Single-command onboarding for design partners: `git clone && docker compose up`.
 
 **What we're NOT building:**
-- Our own foundation model. Claude is the accelerant, not the moat.
-- A SIEM. We plug into Sentinel, not replace it.
-- A SOAR. We output recommended actions; humans or existing SOAR (Tines/Torq/Sentinel playbooks) execute.
+- Our own foundation model. Claude/Gemini are the accelerant, not the moat.
+- A SIEM. We plug into Splunk (and Sentinel post-MVP), not replace either.
+- A SOAR. We output recommended actions; humans or existing SOAR (Tines/Torq/Splunk playbooks/Sentinel playbooks) execute.
 - Kubernetes, Terraform, service mesh, or anything else that burns weeks before product-market fit.
 
 ---
 
 ## Go-to-market (12-month bootstrap)
 
-### Months 0-3: Build + design partners
-- Ship MVP (Sentinel alert → investigation report).
-- Recruit **3 unpaid design partners**: 1 Tier-2/3 MSSP, 2 mid-market AU companies (leverage founder's network).
-- Weekly feedback loop. Ship fixes in days.
+### Months 0-3: Build + founder-as-design-partner
+- Ship MVP (Splunk notable → investigation report) on founder's own Splunk Enterprise box. Founder = design partner #0 throughout build (wks 1-12).
+- External design-partner outreach begins **wk 12-15** (not earlier — pitching while still scaffolding wastes calls). Targets: 1 Tier-2/3 MSSP, 2 mid-market AU companies (leverage founder's network).
+- Weekly feedback loop with externals from wk 13. Ship fixes in days.
 - Begin SOC2 Type I controls (self-attested is fine at MVP).
 
 ### Months 3-6: First paid pilots
@@ -132,9 +142,9 @@ Output: decision-ready investigation report (verdict, confidence, evidence chain
 ## Unit economics (rough)
 
 **Costs per pilot tenant/month:**
-- LLM inference: ~A$200-800/mo per mid-size tenant (1K-5K alerts/mo triaged, prompt caching on), dropping ~10x/yr per Epoch AI.
-- AWS infra: ~A$150-300/mo per tenant.
-- Total COGS: **A$350-1,100/mo**. Gross margin at A$2K pricing: 45-82%. Improves fast.
+- LLM inference: ~A$200-800/mo per mid-size tenant (1K-5K alerts/mo triaged), assuming production cache hit rate hits the wk-7 eval target. **Cache hit rate is an eval target, not a budget assumption** — OpenRouter passthrough caching has provider/TTL/sticky-routing caveats, so wk-7 will measure actuals before any pricing is locked.
+- Infra: ~A$150-300/mo per tenant (Docker host or AWS Sydney).
+- Total COGS: **A$350-1,100/mo (assuming cache target met)**. Gross margin at A$2K pricing: 45-82%. Re-validate post wk-7 eval.
 
 **Pricing assumption year 1:**
 - MSSP: A$2-5K/mo/tenant they onboard. Or A$500-1.5K per seat in their SOC.
@@ -156,30 +166,31 @@ Output: decision-ready investigation report (verdict, confidence, evidence chain
 
 ---
 
-## Key files & next steps (when ExitPlanMode approved)
+## Key files & next steps
 
-This is greenfield; no existing code. Bootstrap order:
-1. **/README.md** — one-page spec + `docker compose up` quickstart.
-2. **/docker-compose.yml** — all services (orchestrator, web, api, postgres, redis, minio, mcp-sentinel, mcp-enrich, worker, traefik).
-3. **/docker-compose.override.yml** — dev-only overrides (hot reload, exposed ports, seed data).
-4. **/.env.example** — required env vars (ANTHROPIC_API_KEY, Entra tenant IDs, VT key, etc.).
-5. **/docs/compliance-mapping.md** — Essential Eight + APRA CPS 234 claims mapped to controls.
-6. **/apps/orchestrator/** (Python) — LangGraph StateGraph + MCP tool clients.
-7. **/apps/web/** — Next.js investigation viewer + audit log explorer.
-8. **/apps/api/** — thin REST layer (auth, tenant scoping, rate limiting).
-9. **/mcp/sentinel/** — MCP server wrapping Microsoft Graph + Sentinel KQL.
-10. **/mcp/enrich/** — MCP server for VT / AbuseIPDB / GreyNoise.
-11. **/evals/** — golden-set investigation benchmarks. Critical — this is the quality moat.
-12. **/docs/design-partner-brief.pdf** — 1-pager for MSSP outreach.
+Repo is bootstrapped — compose stack, scaffolded apps, initial migration, MITRE seed all exist as of wk 1-2 (see `tasks/todo.md` for current state). Continued build order:
+
+1. **`docker-compose.yml` + override** — extant. Services: orchestrator, web, api, postgres, redis, minio, mcp-splunk, worker, traefik.
+2. **`.env.example`** — extant. Required: `SPLUNK_HOST`, `SPLUNK_TOKEN`, `SPLUNK_HEC_TOKEN`, `OPENROUTER_API_KEY`, `TENANT_SECRET_KEY`, `LANGSMITH_API_KEY`, `INGEST_WEBHOOK_SECRET`, `DEV_BYPASS_AUTH=1`.
+3. **`/db/migrations/`** — Alembic. Initial schema present. Next: RLS hardening + audit hash chain + writeback_mode + sovereignty hybrid columns (wk-2 cleanup).
+4. **`/apps/orchestrator/`** — LangGraph StateGraph + `LLMRouter` wrapper (app-side fallback) + MCP tool clients. Wks 5-8.
+5. **`/apps/web/`** — Next.js investigation viewer + step-replay UI + admin panel (creds + per-role LLM config + budgets + usage). Wks 9-11.
+6. **`/apps/api/`** — FastAPI; auth, tenant scoping, ingest webhook. Wk 4.
+7. **`/mcp/splunk/`** — `splunk-sdk` for search + ES endpoints; `httpx` for HEC; `siem_*` tool surface. Wk 2 (skeleton) → wk 8 (writeback complete).
+8. **`/evals/`** — golden-set investigation benchmarks. Splunk BOTS v3 + Atomic Red Team + honeypot + hand-labelled. Critical — this is the quality moat. Wk 6+.
+9. **`/docs/compliance-mapping.md`** — Essential Eight + APRA CPS 234 claims mapped to controls. Wk 13.
+10. **`/docs/design-partner-brief.pdf`** — 1-pager for MSSP outreach. Wk 12.
 
 **Deferred until first paying customer requires it:**
 - `/infra/` Terraform for AWS Sydney (ECS task defs generated from compose).
 - Kubernetes manifests (maybe never; compose → ECS is enough).
+- Sovereign-mode runtime: Bedrock Sydney + Azure AU East provider routes in `LLMRouter`. DB columns present from MVP.
 
 Reuse opportunities:
-- **LangGraph** for agent orchestration — native HITL + checkpointing + production track record in SOC/security space.
-- MCP servers for Microsoft Graph / Sentinel — likely community MCP already exists; check `modelcontextprotocol` repos.
-- **Prompt caching** in Claude API — investigation prompts cache the incident context, cutting costs 5-10x on multi-turn.
+- **LangGraph** for agent orchestration — native HITL `interrupt()` + Postgres checkpointer + multi-agent runway.
+- **`langchain-mcp-adapters`** — bridges LangGraph node to MCP tool servers without writing per-tool glue.
+- **`splunk-sdk` (PyPI)** — official, used for both search and ES endpoints via low-level `service.post()`.
+- **Prompt caching** via OpenRouter passthrough — eval target wk 7. Treat 5x cost cut as hypothesis to measure, not a planning assumption.
 
 ---
 
@@ -191,28 +202,29 @@ Reuse opportunities:
 - Microsoft ships a free sovereign Sentinel Copilot for AU gov (structural death).
 
 **Major risks:**
-1. **Founder burnout** — solo + bootstrap + 12mo. Build in 1-day-a-week protection.
-2. **Data residency for Claude** — if Anthropic doesn't offer AU residency by month 6, either self-host open-weight fallback (Llama/Qwen on Bedrock Sydney) or get contractual data-processing addendum. Research now.
+1. **Founder burnout** — solo + bootstrap + 13-15wk MVP + 12mo runway. Build in 1-day-a-week protection.
+2. **Sovereignty gap closes for paying tenants** — first sovereignty-sensitive AU buyer (gov-adjacent, financial services) won't accept OpenRouter+LangSmith SaaS. Sovereign-mode tier (BYO Bedrock Sydney / Azure AU East + LangSmith off + BYO keys) must be ready before that conversation closes. DB surface in MVP; runtime ships post-MVP at signal.
 3. **MSSP channel conflict** — if we sell direct to mid-market AND to MSSPs serving similar segments, channel will push back. Define segmentation early.
 4. **Quality gap** — Dropzone has 370% NRR because investigations are actually good. Golden-set evals from day 1.
+5. **Splunk ES vs base Splunk gap** — dual writeback (`notable_update` + HEC) requires Splunk Enterprise Security. Plain Splunk Enterprise tenants get `hec_only` mode (degraded UX). Default tenant config = `hec_only` (conservative). MSSP customers with ES flip to `dual`. See ADR-0018.
 
 ---
 
 ## Verification (how we know it's working)
 
 **Technical:**
-- Golden-set of 50 labeled Sentinel incidents (true positive, false positive, benign, critical). MVP must hit ≥85% verdict agreement with senior analyst.
-- Latency <5 min per investigation at p50, <15 min at p95.
-- Audit log completeness: every LLM call, every KQL query, every tool call traceable.
+- Golden-set of 50+ labeled Splunk incidents (Splunk BOTS v3 CTF-key-derived + Atomic Red Team + honeypot + hand-labelled ambiguous). Verdict classes: true positive, false positive, benign, inconclusive. MVP ship gate: ≥85% verdict agreement with senior analyst, ≥0.70 MITRE F1.
+- Latency p50 < 5 min per investigation, p95 < 15 min.
+- Audit log completeness: every LLM call (per attempt, including failures), every MCP tool call, every user action logged with hash chain integrity verifiable.
 
 **Commercial:**
-- Month 3: 3 design partners using weekly.
+- Wks 13-15: external design partner outreach begins.
 - Month 6: 1 paid pilot A$2K+/mo.
 - Month 9: A$15K+ MRR, 1 MSSP reseller signed.
 - Month 12: A$30K+ MRR OR clear funding path.
 
 **Compliance:**
-- Essential Eight ML2 alignment doc published month 3.
+- Essential Eight ML2 alignment doc published wk 13.
 - SOC2 Type I started month 6, attested month 9.
 - IRAP assessor contacted month 9 (executed with paying government-adjacent customer).
 
@@ -220,7 +232,6 @@ Reuse opportunities:
 
 ## Open decisions (defer)
 
-- Company name / domain.
-- Co-founder or solo (bootstrap-compatible either way).
-- Anthropic vs. Bedrock Claude routing (depends on AU residency timeline).
-- Exact MSSP partner targets (research + outreach in month 1).
+- Co-founder vs. solo (bootstrap-compatible either way).
+- Exact MSSP partner targets (research + outreach in wk 12+).
+- Sovereign-mode tier pricing model (% premium over standard tenant pricing). Defer until first sovereign-mode design-partner conversation.

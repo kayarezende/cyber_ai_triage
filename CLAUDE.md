@@ -1,6 +1,6 @@
 # Sentient Layer (working dir: cyber-ai-triage)
 
-Sovereign AI SOC triage platform for Australian MSSPs + mid-market. SIEM-agnostic, **Splunk-first MVP**. Domain: `sentientlayer.ai`. See `docs/PLAN.md` for strategy, `tasks/todo.md` for the build plan, `docs/context/` for current state, `docs/decisions/` for ADRs.
+Australian-built AI SOC triage platform for AU MSSPs + mid-market. SIEM-agnostic, **Splunk-first MVP**. Domain: `sentientlayer.ai`. **MVP is not sovereign** (OpenRouter US + LangSmith SaaS); sovereign-mode tier (BYO Bedrock Sydney / Azure AU East routing, LangSmith off, BYO LLM keys) ships post-MVP — DB surface present from MVP. See `docs/PLAN.md` for strategy, `tasks/todo.md` for the build plan, `docs/context/` for current state, `docs/decisions/` for ADRs.
 
 ---
 
@@ -21,8 +21,10 @@ An AI SOC analyst that ingests SIEM notable events, investigates autonomously wi
 | SIEM MVP | Splunk on-prem | Sentinel wk 10-14 |
 | Backend languages | Python (agent, API, worker, MCP) | N/A |
 | Frontend | Next.js 15 + Tailwind (minimal TS surface) | N/A |
-| Agent framework | **LangGraph** + `langchain-anthropic` + `langchain-mcp-adapters` + `langgraph-checkpoint-postgres`. Agent tracing via **LangSmith**. | N/A |
-| LLM routing | **OpenRouter** all tiers. Per-role config (`triage`, `investigation`, `review` active MVP; `summarize`, `entity_extraction` defined-disabled). OpenRouter native fallback chain per role. MVP dev default: `google/gemini-3-flash-preview`. Prod default: Opus + Haiku. | N/A |
+| Agent framework | **LangGraph** + `langchain-mcp-adapters` + `langgraph-checkpoint-postgres`. Agent tracing via **LangSmith** (per-tenant `langsmith_enabled` toggle). LLM calls via custom `LLMRouter` wrapper, not `langchain-anthropic`. | N/A |
+| LLM routing | **OpenRouter** all tiers. Per-role config (`triage`, `investigation`, `review` active MVP; `summarize`, `entity_extraction` defined-disabled). **App-side fallback loop** (per-attempt audit ledger). See ADR-0015. MVP dev default: `google/gemini-3-flash-preview`. Prod defaults: Opus 4.7 (investigation) + Sonnet 4.6 (review) + Haiku 4.5 (triage), all admin-overridable. | N/A |
+| Splunk product tier | Splunk Enterprise (base). **Splunk ES required for `dual` writeback**; degraded `hec_only` mode (HEC post only, `notable_update` no-op) for plain Splunk. Per-tenant `writeback_mode`. See ADR-0018. | N/A |
+| Sovereignty | **MVP not sovereign** (OpenRouter US + LangSmith SaaS). Hybrid surface in `tenants` table (BYO LLM keys + region constraint + langsmith toggle columns). Sovereign-mode tier ships post-MVP. See ADR-0016. | Post-MVP paid tier |
 | HITL | LangGraph `interrupt()` + JSONB rule engine (`hitl_policies`). MVP default: 100% human approval. | Post-MVP: drag-drop rule builder |
 | Company | **Sentient Layer** (domain: `sentientlayer.ai`) | N/A |
 | DB | Postgres 16, soft multi-tenancy (`tenant_id` + RLS) | Hard tenancy month 6 |
@@ -32,7 +34,7 @@ An AI SOC analyst that ingests SIEM notable events, investigates autonomously wi
 | Auth | **Dev bypass only for MVP**. Entra ID SSO → wk 11 pre-demo | N/A |
 | Splunk client | `splunk-sdk` (PyPI) for search + ES endpoints via low-level `service.post()`. `httpx` for HEC (different port, different auth) | N/A |
 | Enrichment | Splunk-native only | VT/AbuseIPDB/GreyNoise month 4 |
-| Writeback | **Dual**: `notable_update` REST (enriches original notable in ES) + HEC post to `triage_verdicts` index | N/A |
+| Writeback | Per-tenant `writeback_mode`. `dual` (ES tenants): `notable_update` REST + HEC. `hec_only` (base Splunk): HEC only. Default `hec_only` (conservative). | N/A |
 | Standards | MITRE ATT&CK (STIX cache) + **OCSF 1.3.0** | N/A |
 | Billing | Customer pays founder direct; per-tenant LLM usage tracked | N/A |
 | Image upgrade | Manual Docker image tag pin in compose | Auto-update month 4+ |
@@ -91,7 +93,7 @@ Multi-role LLM pipeline via OpenRouter, configurable per-role in admin panel:
 4. **Deterministic post-pass.** `detection_rules` table evaluates MITRE technique sets for known killchains (ransomware: T1059.001 + T1071 + T1486). Can override agent severity. Keeps critical correlations rule-based, not purely LLM-judged.
 5. **Dual writeback.** Final OCSF Detection Finding posted to Splunk via **(a)** `notable_update` REST to attach verdict + link on the original notable (analyst sees it in ES) **and** **(b)** HEC post to `triage_verdicts` index for our own queryable record.
 
-**OpenRouter native fallback** per role: request includes `"models": [primary, *fallback_chain], "route": "fallback"`. If all models fail → investigation marked inconclusive + dashboard card with attempt history + `notable_update` posts "human review needed".
+**App-side fallback loop** per role (`LLMRouter` wrapper at `apps/orchestrator/src/llm/router.py`). Tries primary → catches `httpx.TimeoutException` / `httpx.HTTPStatusError` → logs per-attempt row in `usage` (`attempt_num`, `status`, `latency_ms`, `model_requested`) → tries next model in `fallback_chain`. If all models fail → raises `FallbackChainExhausted` → investigation marked `inconclusive`, `inconclusive_reason` populated, dashboard card with attempt history, writeback posts "human review needed". Per-attempt audit ledger required for compliance posture (see ADR-0015).
 
 ---
 
@@ -114,7 +116,7 @@ Multi-role LLM pipeline via OpenRouter, configurable per-role in admin panel:
 
 ```bash
 cp .env.example .env
-# edit: SPLUNK_HOST, SPLUNK_TOKEN, SPLUNK_HEC_TOKEN, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, TENANT_SECRET_KEY, DEV_BYPASS_AUTH=1
+# edit: SPLUNK_HOST, SPLUNK_TOKEN, SPLUNK_HEC_TOKEN, OPENROUTER_API_KEY, TENANT_SECRET_KEY, LANGSMITH_API_KEY, INGEST_WEBHOOK_SECRET, DEV_BYPASS_AUTH=1
 
 docker compose up -d
 docker compose logs -f orchestrator
@@ -125,7 +127,7 @@ App at `https://app.triage.local` (Traefik TLS). API at `https://api.triage.loca
 To trigger a test investigation from Splunk:
 1. Create a saved search with alert action = webhook → `https://api.triage.local/api/incidents/ingest`.
 2. Drop a test notable.
-3. Investigation runs; verdict POSTed back via `notable_update` + HEC.
+3. Investigation runs; verdict POSTed back via writeback (HEC always, plus `notable_update` if tenant `writeback_mode='dual'` and Splunk ES is installed).
 
 ---
 
@@ -136,8 +138,8 @@ To trigger a test investigation from Splunk:
 - **Tests:** `pytest` for Python, `playwright` for e2e. Every MCP tool and OCSF mapper has unit tests. Pydantic tool-contract schemas + golden tests to catch drift.
 - **Migrations:** Alembic only. No raw SQL in app code outside migrations.
 - **Secrets:** `.env` for dev. Never committed. Per-tenant Splunk tokens live encrypted in Postgres (`tenants.splunk_token_encrypted`, Fernet key from env).
-- **Audit log:** append-only Postgres table, INSERT-only role. Hash chain content for tamper evidence.
-- **LLM usage:** every call logged to `usage` table with token counts + USD cost. No untracked inference.
+- **Audit log:** hash-chained append-only Postgres table. `previous_hash` + `hash_scope` columns. Compute trigger on INSERT; UPDATE/DELETE blocked by triggers. `audit_writer` DB role with INSERT/SELECT only. See ADR-0017.
+- **LLM usage:** every attempt (success + failure) logged to `usage` table with `attempt_num`, `model_requested`, `model_used`, status, token counts, USD cost, latency. App-side fallback loop owns the logging — see ADR-0015. No untracked inference.
 - **Logging:** `structlog` → stdout JSON everywhere. Docker captures.
 - **Prompt injection defense:** untrusted fields from Splunk events pass through a sanitizer before entering agent context. Agent has **tool-only access** — no shell, no filesystem, no network beyond MCP servers.
 
