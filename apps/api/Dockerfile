@@ -14,6 +14,7 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY libs/common ./libs/common
+COPY libs/ocsf ./libs/ocsf
 COPY apps/api ./apps/api
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --package sentient-api
@@ -27,6 +28,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /app /app
+COPY libs/ocsf ./libs/ocsf
 COPY apps/api ./apps/api
 
 ENV PATH="/app/.venv/bin:${PATH}" \
