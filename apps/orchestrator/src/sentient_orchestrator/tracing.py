@@ -1,8 +1,16 @@
 """LangSmith tracing init (ADR 0013).
 
-Gated on both LANGSMITH_TRACING truthy AND LANGSMITH_API_KEY looking real
-(starts with `ls__`, per LangSmith's own convention) — the .env.example ships a
-`CHANGEME_ls__...` placeholder that must NOT trigger a network probe on boot.
+Gated on both LANGSMITH_TRACING truthy AND LANGSMITH_API_KEY looking real (a
+non-empty value that isn't the `.env.example` `CHANGEME_*` placeholder). We
+accept both the older `ls__` and current `lsv2_` LangSmith key prefixes, plus
+any other non-CHANGEME value (LangSmith Hub keys, self-hosted, etc.).
+
+When tracing is enabled, this module also exports `LANGCHAIN_TRACING_V2` and
+`LANGCHAIN_PROJECT` into the process env. LangChain's runnables (incl.
+`ChatOpenAI` + `bind_tools`) read those legacy `LANGCHAIN_*` env vars when
+deciding whether to ship traces. Setting only `LANGSMITH_TRACING` is not
+enough — without `LANGCHAIN_TRACING_V2=true` the LangSmith dashboard shows
+no runs even though `Client()` initialised cleanly.
 """
 
 from __future__ import annotations
@@ -15,6 +23,11 @@ log = get_logger(__name__)
 
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
+# Real LangSmith API keys ship with one of these prefixes today; we also
+# accept anything else that isn't an obvious placeholder so self-hosted /
+# Hub keys aren't rejected.
+_KNOWN_KEY_PREFIXES: tuple[str, ...] = ("ls__", "lsv2_")
+
 
 def _is_tracing_requested() -> bool:
     return os.environ.get("LANGSMITH_TRACING", "").lower() in _TRUTHY
@@ -22,7 +35,12 @@ def _is_tracing_requested() -> bool:
 
 def _has_real_key() -> bool:
     key = os.environ.get("LANGSMITH_API_KEY", "")
-    return key.startswith("ls__")
+    if not key:
+        return False
+    if key.startswith("CHANGEME_"):
+        return False
+    # Allow ls__ / lsv2_ explicitly + any other non-placeholder value.
+    return any(key.startswith(p) for p in _KNOWN_KEY_PREFIXES) or len(key) >= 20
 
 
 def init_tracing() -> bool:
@@ -51,6 +69,11 @@ def init_tracing() -> bool:
             error=str(exc),
         )
         return False
+
+    # Propagate to LangChain's legacy env vars so `ChatOpenAI` etc. ship
+    # traces. LangSmith SDK + LangChain read different env names.
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGCHAIN_PROJECT", project)
 
     log.info("langsmith tracing enabled", project=project)
     return True

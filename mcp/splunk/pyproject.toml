@@ -4,13 +4,28 @@ version = "0.0.1"
 description = "MCP server exposing generic siem_* tools backed by Splunk"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
+    # FastMCP `streamable_http_app` + `@custom_route` need ≥1.27.
+    "mcp[cli]>=1.27,<2",
+    # Splunk client — PyPI name `splunk-sdk` (not `splunk-sdk-python`).
+    "splunk-sdk>=2.1",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
     "uvicorn[standard]>=0.32",
+    "starlette>=0.40",
+    "anyio>=4.6",
     "sentient-common",
+    # NOTE: `httpx` lands wk 8 with `siem_hec_post` (HEC needs different host
+    # + token than the management REST endpoint). FastAPI removed wk 2 —
+    # FastMCP returns a Starlette ASGI app directly via `streamable_http_app()`.
 ]
-# NOTE: wk 2 adds `mcp[cli]`, `splunk-sdk` (PyPI name, not splunk-sdk-python),
-# and `httpx` when the real siem_* tools land. Current file is a /health stub
-# only so compose is healthy.
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+    "syrupy>=4.7",
+]
 
 [build-system]
 requires = ["hatchling"]

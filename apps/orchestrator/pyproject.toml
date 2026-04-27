@@ -4,13 +4,21 @@ version = "0.0.1"
 description = "LangGraph agent runner"
 requires-python = ">=3.12"
 dependencies = [
-    "langgraph>=0.2.60",
+    "langgraph>=1.1,<2",
     "langgraph-checkpoint-postgres>=3.0",
     "langchain-anthropic>=0.3",
     "langchain-openai>=0.3",
-    "langchain-mcp-adapters>=0.1",
+    "langchain-mcp-adapters>=0.2,<0.3",
     "langsmith>=0.2",
+    "mcp>=1.27,<2",
     "sentient-common",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
 ]
 
 [build-system]

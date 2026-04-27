@@ -13,6 +13,7 @@ from types import FrameType
 from typing import cast
 
 import redis
+
 from sentient_common.logging import configure_logging, get_logger
 
 _SENTINEL = Path("/tmp/ready")

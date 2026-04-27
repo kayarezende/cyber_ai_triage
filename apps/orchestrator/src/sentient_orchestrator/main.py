@@ -13,7 +13,6 @@ from pathlib import Path
 from types import FrameType
 
 from sentient_common.logging import configure_logging, get_logger
-
 from sentient_orchestrator.tracing import init_tracing
 
 _SENTINEL = Path("/tmp/ready")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
+
 from sentient_common import crypto
 
 

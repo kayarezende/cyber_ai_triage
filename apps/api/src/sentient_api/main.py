@@ -10,10 +10,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from sentient_common.logging import configure_logging, get_logger
 
 from sentient_api.middleware.auth import DevBypassAuthMiddleware
 from sentient_api.routers import health
+from sentient_common.logging import configure_logging, get_logger
 
 configure_logging(service="api")
 log = get_logger(__name__)

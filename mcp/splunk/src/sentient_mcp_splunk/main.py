@@ -1,32 +1,34 @@
-"""MCP Splunk server — /health stub only.
+"""ASGI entrypoint for the Splunk MCP server.
 
-TODO wk 2: replace with mcp.server exposing siem_query, siem_get_notable,
-siem_get_entity_history, siem_process_tree, siem_lookup_ioc,
-siem_notable_update, siem_hec_post. Transport choice (stdio vs SSE/HTTP)
-revisited when real tools land.
+Co-locates the MCP `streamable_http` endpoint (mounted by FastMCP at `/mcp`)
+with the `/health` route the docker-compose healthcheck probes. Both are
+served from the same Starlette app via FastMCP's `custom_route` decorator —
+no parent FastAPI wrapper needed.
+
+Transport choice rationale: ADR-0019.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-from fastapi import FastAPI
 from sentient_common.logging import configure_logging, get_logger
+from sentient_mcp_splunk.server import build_mcp
 
 configure_logging(service="mcp-splunk")
 log = get_logger(__name__)
 
-
-@asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    log.info("mcp-splunk stub ready", note="real MCP tools land wk 2")
-    yield
+mcp = build_mcp()
 
 
-app = FastAPI(title="Sentient Layer MCP Splunk (stub)", version="0.0.1", lifespan=_lifespan)
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "mcp-splunk"})
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "mcp-splunk"}
+# uvicorn target — `sentient_mcp_splunk.main:app`. Same path the Dockerfile
+# CMD + docker-compose.override.yml --reload command point at, so the
+# transport flip from FastAPI → FastMCP is invisible to the runtime config.
+app = mcp.streamable_http_app()
+log.info("mcp-splunk ready", transport="streamable_http", health_path="/health")

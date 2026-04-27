@@ -457,23 +457,29 @@ _Session 2 (2026-04-16 / 17): full stack + libs/common + MITRE seed + splunk-set
 _Session-start prereqs (founder-run before Claude touches wk 2 code):_
 
 - [ ] Fill `.env` real values: `SPLUNK_HOST`, `SPLUNK_TOKEN`, `SPLUNK_HEC_HOST`, `SPLUNK_HEC_TOKEN`, `OPENROUTER_API_KEY`, `LANGSMITH_API_KEY` (must start `ls__`), then flip `LANGSMITH_TRACING=true`.
-- [ ] BOTS v3 loaded on Splunk box per `docs/splunk-setup.md` §6 (required for the `siem_query` / `siem_get_notable` unit tests).
+- [x] BOTS v3 loaded on Splunk box per `docs/splunk-setup.md` §6 (closed wk 1).
 - [ ] Network reachability from docker host: both `${SPLUNK_HOST}:8089` and `${SPLUNK_HEC_HOST}:8088` respond (`docs/splunk-setup.md` §8).
 
 _Carry-over from wk 1 (non-blocking; resolve opportunistically):_
 
-- [ ] Traefik Docker-provider doesn't read container labels on Docker Desktop for Mac. Pick one fix: (a) Docker Desktop → Settings → Advanced → enable "Allow the default Docker socket to be used", then `docker compose restart traefik`; or (b) add `tecnativa/docker-socket-proxy` sidecar. Host ports in `docker-compose.override.yml` currently work around it.
+- [ ] Traefik Docker-provider doesn't read container labels on Docker Desktop for Mac. Pick one fix: (a) Docker Desktop → Settings → Advanced → enable "Allow the default Docker socket to be used", then `docker compose restart traefik`; or (b) add `tecnativa/docker-socket-proxy` sidecar. Host ports in `docker-compose.override.yml` currently work around it. _Punt to wk 9 if not needed for wk-2 dev._
 - [x] `splunk-sdk` (PyPI) — update `CLAUDE.md` + `docs/context/stack-locks.md` when the dep lands (currently both say `splunk-sdk-python`). _Done wk 2 Step 0; also removed stale "hybrid" LLM routing row from CLAUDE.md that contradicted ADR 0004._
 
-_Wk 2 work:_
+_Wk 2 work (file-side complete 2026-04-27; founder live-gates pending):_
 
-- [ ] Python MCP server (`mcp` official SDK) exposing `siem_query`, `siem_get_notable` backed by Splunk — replaces the `/health`-only FastAPI stub at `mcp/splunk/src/sentient_mcp_splunk/main.py`. Pick real MCP transport (stdio vs SSE/HTTP) now that real tools land.
-- [ ] Splunk client: `splunk-sdk` Service for search jobs + auth/session.
-- [ ] Pydantic tool-contract schemas + golden tests.
-- [ ] Unit tests against local Splunk (BOTS data loaded wk 1).
-- [ ] **Verify: LangGraph + ChatOpenAI-pointed-at-OpenRouter + `langchain-mcp-adapters` + `PostgresSaver` all integrate.** Minimal graph with one tool call + checkpoint round-trip, visible in LangSmith.
-- [ ] **Verify: OpenRouter structured output + tool_use passthrough** with Gemini 3 Flash.
-- [ ] OCSF 1.3.0 validator library spike: try `py-ocsf-models` vs hand-rolled Pydantic v2 for Detection Finding (class_uid 2004). Lock choice in ADR update.
+- [x] Python MCP server (`mcp` official SDK) exposing `siem_query`, `siem_get_notable` backed by Splunk — replaces the `/health`-only FastAPI stub at `mcp/splunk/src/sentient_mcp_splunk/main.py`. **Transport locked to `streamable_http` (ADR-0019).**
+- [x] Splunk client: `splunk-sdk` Service for search jobs + auth/session. Cached singleton `SplunkClientFactory` at `mcp/splunk/src/sentient_mcp_splunk/splunk_client.py`. Wk-4 boundary: refactor `get(...)` to `get(tenant_id)` for per-tenant Fernet-decrypted tokens.
+- [x] Pydantic tool-contract schemas (`SiemQueryInput`/`Output`, `SiemEvent`, `SiemGetNotableInput`/`Output`) + golden tests scaffolded via `syrupy` (founder runs `-m integration` on box to capture snapshots).
+- [x] Unit tests for both tools — 55 tests covering schemas, normalize_spl, dict_to_event, all 5 error mappings (auth, timeout, 4xx, 5xx, internal), found/not_found/degraded paths.
+- [x] **Verify: LangGraph + ChatOpenAI-pointed-at-OpenRouter + `langchain-mcp-adapters` + `PostgresSaver` all integrate.** 3-node verify graph at `apps/orchestrator/src/sentient_orchestrator/verify/graph.py`; CLI `python -m sentient_orchestrator.verify`; pytest at `apps/orchestrator/tests/test_verify_smoke.py`. **Founder runs live OpenRouter+LangSmith smoke to close.**
+- [x] **Verify: OpenRouter structured output + tool_use passthrough** with Gemini 3 Flash. Covered by the verify graph's `extract_ip` (structured output) + `call_echo_tool` (tool_use) nodes. **Founder live-runs to close.**
+- [x] OCSF 1.3.0 validator library spike: hand-rolled Pydantic v2 chosen (ADR-0020 supersedes ADR-0007 §validator). `libs/ocsf/src/sentient_ocsf/detection_finding.py` ships `DetectionFinding` (class_uid 2004) + nested objects + Sentient extensions + `to_hec_dict()` namespacer. 14 tests passing.
+
+_Wk-2 founder live-gates — all PASSED 2026-04-27 (see `tasks/lessons.md` for findings):_
+
+- [x] **Day 1 framework gate** — exit 0; `structured_output_ok=true`, `tool_call_count=1`, `checkpoint_count=5`, `src_ip=10.0.0.42`, `echo_result="echoed: ip=10.0.0.42"`, `langsmith_enabled=true`. LangSmith project = "cyber ai triage". One in-session bug fix: `runner.py`'s independent `langsmith_enabled` check still used the legacy `ls__` prefix; aligned with `tracing.py` after first run reported `langsmith_enabled=false` while traces were actually shipping.
+- [x] **Day 2 Splunk SDK smoke** — Splunk 10.0.2 on Ubuntu reachable at 192.168.0.x:8089. `service.info` + 20 indexes listed. Required two env-level overrides documented in lessons: `SPLUNK_VERIFY_TLS=false` (self-signed cert) and replacing `-100y` time ranges with bounded windows (Splunk 10.0.2 rejects `-100y` with HTTP 400). **BOTS v3 was NOT loaded** despite wk-1 claim — `index=botsv3` doesn't exist; `main` has live UniFi logs. Updated integration tests to skip BOTS-dependent paths cleanly + added `test_internal_basic_query` BOTS-independent smoke.
+- [x] **Day 5 transport gate (docker)** — `docker compose build mcp-splunk` + `up -d` succeeded; container healthy in 5s; `/health` 200; `splunk_smoke --invoke` runs `siem_query("index=_internal | head 5", "-1h", "now")` end-to-end through the container against the LAN Splunk box. tool_count=2 confirmed, MCP protocol 2025-11-25 negotiated, full request → splunk-sdk → Splunk → response round-trip green.
 
 **Wk 3 — OCSF normalization layer**
 - [ ] Splunk notable → OCSF 1.3.0 Detection Finding mapper.
@@ -585,6 +591,82 @@ _Wk 2 work:_
 
 ### Wk 0 Review
 _Pending._
+
+### Wk 2 Review
+
+**Session 1 (2026-04-27) — file-side complete; founder live-gates pending.**
+
+Landed (uncommitted at end of session):
+
+- `apps/orchestrator/pyproject.toml` deps bumped: `langgraph>=1.1,<2`, `langchain-mcp-adapters>=0.2,<0.3`, `mcp>=1.27,<2`. Dev deps: `pytest-asyncio>=0.24`, `pytest-mock>=3.14`. Installed: langgraph 1.1.6, langchain-mcp-adapters 0.2.2, mcp 1.27.0, pydantic 2.13.0, langchain-openai 1.1.13.
+- Verify harness at `apps/orchestrator/src/sentient_orchestrator/verify/`:
+  - `echo_mcp_server.py` — stdio FastMCP, single `echo(msg) -> str` tool.
+  - `llm.py` — `build_chat_openrouter()` with `default_headers={HTTP-Referer, X-Title}`, `temperature=0`, `max_retries=0`. Documents the wk-2 acceptance of `langchain-openai 1.1.13`'s OpenRouter warning (ADR-0015 LLMRouter takes over wk 5).
+  - `schemas.py` — `VerifyState` TypedDict, `ExtractedIP` Pydantic.
+  - `graph.py` — 3-node StateGraph (`extract_ip` → `call_echo_tool` → `done`) with `inject_failure` env hook for resume-after-crash testing.
+  - `runner.py` — async `verify_run(thread_id)` returns structured summary; uses `AsyncPostgresSaver`.
+  - `__main__.py` — CLI; exit codes 0/1/2 (ok / verify-failed / pre-flight-failed).
+  - `splunk_smoke.py` — re-usable `streamable_http` round-trip CLI for both Day-2 (empty) and Day-5 (tools-loaded) gates.
+- Pytest scaffold at `apps/orchestrator/tests/{conftest,test_verify_smoke}.py`. Skips cleanly when env carries `.env.example` placeholders.
+- `mcp/splunk/pyproject.toml` deps reshuffled: dropped `fastapi`; added `mcp[cli]>=1.27`, `splunk-sdk>=2.1`, `pydantic>=2.9`, `pydantic-settings>=2.6`, `anyio>=4.6`, `starlette>=0.40`. Dev deps: `pytest-asyncio`, `pytest-mock`, `syrupy>=4.7`.
+- `mcp/splunk/src/sentient_mcp_splunk/`:
+  - `main.py` — replaces FastAPI stub; FastMCP `streamable_http_app()` + `@mcp.custom_route("/health")` co-host on the same Starlette ASGI app. Dockerfile + uvicorn target unchanged.
+  - `server.py` — `build_mcp() → FastMCP`; tool registration via per-module `register(mcp)` functions.
+  - `settings.py` — pydantic-settings env loader.
+  - `splunk_client.py` — cached `splunklib.client.Service` singleton with reset on auth failure. Comment block flags wk-4 per-tenant refactor boundary.
+  - `errors.py` — JSON-RPC error mapping (`SiemToolError(kind, message)` → MCP `INTERNAL_ERROR` + `data.kind`).
+  - `schemas/{siem_query,siem_get_notable}.py` — Pydantic v2 input/output models. `SiemQueryInput` rejects 14 forbidden SPL token forms; `SiemGetNotableInput` `notable_id` regex `^[A-Za-z0-9_:.\-@]+$`.
+  - `tools/siem_query.py` — `oneshotsearch` via `asyncio.to_thread`, prepended `search` for non-generators, `JSONResultsReader` parsing, error mapping for 5 splunk-sdk exception types. Tool description block surfaces forbidden-SPL contract to the LLM.
+  - `tools/siem_get_notable.py` — degraded-mode for plain Splunk (no `index=notable`) returns `degraded=true` + structured note rather than erroring.
+- `mcp/splunk/tests/`:
+  - `unit/test_siem_query_schemas.py` (15 tests) — input bounds, forbidden-SPL parametrised, event aliases, time-parse swallow.
+  - `unit/test_siem_query_tool.py` (16 tests) — normalize_spl, dict_to_event, happy path, truncation, no-results, message dropping, all 5 error mappings.
+  - `unit/test_siem_get_notable.py` (10 tests) — input regex (incl SPL-injection rejection), degraded/found/not_found paths, auth_failure mapping, double-quote SPL safety.
+  - `unit/test_server_registration.py` (3 tests) — FastMCP tool surface pinned to `{siem_query, siem_get_notable}`; bumps required when wks 6/8 grow it.
+  - `integration/test_live_splunk.py` (3 tests, `@pytest.mark.integration`) — basic BOTS query + 4625 login-failure shape snapshot + DNS stream snapshot via syrupy. Skips when `SPLUNK_HOST` is placeholder.
+- `libs/ocsf/`:
+  - `pyproject.toml` flipped from `package = false` → hatchling build-backend; `pydantic>=2.9` declared. Workspace member now installable.
+  - `src/sentient_ocsf/__init__.py` re-exports the public API.
+  - `src/sentient_ocsf/detection_finding.py` — hand-rolled OCSF 1.3.0 Detection Finding (`class_uid 2004`). Nested objects: `Metadata`, `Product`, `FindingInfo`, `Analytic`, `Attack`, `MitreTactic`, `MitreTechnique`. Sentient extensions (`verdict`, `evidence_url`, `mitre_techniques[]`) namespaced to `sentient_*` on `to_hec_dict()`. `validate_detection_finding(payload) → DetectionFinding` for the wk-3 mapper.
+  - `tests/test_detection_finding.py` (14 tests) — construction, type_uid auto-derivation + reject-mismatch, confidence bounds, extra-field forbidden, technique uid validation, HEC namespacing, none-exclusion, validator round-trip + class_uid mismatch.
+- `pyproject.toml` (root):
+  - `[tool.pytest.ini_options]` adds `markers = ["integration: requires live Splunk; founder-box only"]` + `addopts = "-m 'not integration'"` + `asyncio_mode = "auto"`.
+  - `[tool.ruff.lint.isort]` sets `known-first-party` to all `sentient_*` workspace modules + `known-third-party = ["mcp"]` (since `mcp/` is also a workspace dir name).
+  - `[tool.mypy]` excludes `tests/` dirs (duplicate-module-name collisions across workspace members) + per-module override turning off `disallow_untyped_decorators` for `sentient_mcp_splunk.main` (FastMCP `custom_route` returns an untyped wrapper) + `ignore_missing_imports` for `splunklib.*`.
+- `docs/decisions/`:
+  - **ADR-0019** (`0019-mcp-transport-streamable-http.md`) — locks `streamable_http`. stdio rejected (single-client, breaks multi-container topology). sse rejected (deprecated MCP spec 2025-03-26).
+  - **ADR-0020** (`0020-ocsf-validator-handrolled-pydantic.md`) — supersedes ADR-0007 §validator. Hand-rolled Pydantic v2 vs `py-ocsf-models` (which targets 1.5.0 → drift).
+  - `README.md` index updated; ADR-0007 status amended to `(validator §refined by 0020)`.
+- `docs/context/stack-locks.md` — Agent-framework + Standards rows updated with `streamable_http` transport lock + `mcp[cli]>=1.27,<2` + hand-rolled OCSF.
+
+Verified end-to-end (this session, on host without live Splunk/OpenRouter):
+
+- `uv run ruff check .` — clean.
+- `uv run mypy apps libs mcp` — 37 source files, no issues.
+- `uv run pytest -q` — **91 passed**, 2 skipped (verify smoke skips on placeholder OPENROUTER_API_KEY), 3 deselected (integration marker).
+- `uv run python -m sentient_orchestrator.verify` — exits 2 with structured "verify aborted" log when LangSmith env not set (correct pre-flight behaviour).
+- **Streamable_http transport gate PASSED locally:** uvicorn-launched FastMCP server + `splunk_smoke.py` returns `tool_count=2 names=['siem_query','siem_get_notable']`. MCP protocol version 2025-11-25 negotiated.
+
+**Post-implementation review pass (same session)** caught + fixed 3 P0s + 4 P1s + 1 P2 — captured in `tasks/lessons.md`:
+
+- (P0) `tracing.py` rejected real `lsv2_`-prefixed LangSmith keys (only accepted legacy `ls__`). Founder gate would have failed silently.
+- (P0) `init_tracing()` set `LANGSMITH_TRACING` but not `LANGCHAIN_TRACING_V2` — LangChain runnables wouldn't have shipped traces even after the prefix fix.
+- (P0) `test_verify_smoke_resumes_after_inject_failure` passed `{"messages": []}` on the second `ainvoke` call — that's a fresh run, not a resume. Reworked: `verify_run(resume=True)` → `ainvoke(None, config)`; tests now also assert `node_call_counts["extract_ip"] == 1` to prove the LLM node didn't re-fire.
+- (P1) Forbidden-SPL guard bypassable via `\t` / multi-space whitespace; switched to regex with `\b` boundaries + `re.IGNORECASE`.
+- (P1) `siem_get_notable` issued `service.indexes['notable']` REST call every invocation; cached the probe with thread-safe invalidation.
+- (P1) `except Exception` could catch already-typed `SiemToolError` and re-wrap as `internal`. Added `except SiemToolError: raise` first in both tool handlers. Removed unused `max_wait` param. Replaced `{"_degraded": True}` dict sentinel with typed `_NotableIndexAbsentError` exception.
+- (P1) `tool_choice="echo"` (specific name) rejected by some OpenRouter providers; switched to `tool_choice="any"`. LangSmith URL builder dropped — printed project URL only + filter hint.
+- (P2) OCSF `DetectionFinding.type_uid` had class-level constant default → didn't track non-default `activity_id`. Now derived in `model_validator(mode="after")`; mismatched explicit value raises.
+
+Decisions surfaced for later resolution:
+
+- (carry from wk 1) `libs/ocsf` package=false → hatchling — **resolved** wk 2 Day 4.
+- (carry from wk 1) Dev-user tenant UUID literal in `apps/api/src/sentient_api/settings.py` — wk 4 wires to seeded `tenants` row.
+- (new) `langchain-openai 1.1.13` actively warns against pointing `base_url` at OpenRouter; non-standard fields silently dropped. Acceptable for wk-2 verify; ADR-0015 LLMRouter (wk 5) goes direct httpx and bypasses LangChain's OpenAI wrapper entirely. Captured in `tasks/lessons.md`.
+- (new) FastMCP returns content-block lists from `BaseTool.ainvoke()` (`[{type:"text", text:"..."}]` rather than plain strings); `verify/graph.py::_extract_tool_text` flattens for ToolMessage content. Pattern reusable in wk-6 `ToolNode`.
+- (new) splunk-sdk's `AuthenticationError(message, cause)` and `HTTPError(response, message)` constructors are non-trivial to mock — `cause` must be itself an `HTTPError`, `response.body` must be a stream not bytes. Captured for future test authors in `lessons.md`.
+
+Carry-over to wk 3: full OCSF Splunk-notable-to-Detection-Finding mapper (`libs/ocsf` consumes the validator landed wk 2; wk 3 adds the Splunk-side mapping + may extend the model with `actor`/`endpoint` objects if real notables surface them).
 
 ### Wk 1 Review
 

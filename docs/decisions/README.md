@@ -63,7 +63,7 @@ What costs do we accept? What do we gain? What becomes harder?
 | 0004 | [OpenRouter as unified LLM routing](0004-openrouter-unified-llm-routing.md) | Accepted (fallback §4 superseded by 0015) |
 | 0005 | [Python backend, Next.js frontend](0005-python-backend-nextjs-frontend.md) | Accepted |
 | 0006 | [Soft multi-tenancy via Postgres RLS](0006-soft-multi-tenancy-rls.md) | Accepted |
-| 0007 | [OCSF 1.3.0 + MITRE ATT&CK as enforced standards](0007-ocsf-and-mitre-standards.md) | Accepted |
+| 0007 | [OCSF 1.3.0 + MITRE ATT&CK as enforced standards](0007-ocsf-and-mitre-standards.md) | Accepted (validator §refined by 0020) |
 | 0008 | [Dual Splunk writeback (HEC + notable_update)](0008-dual-splunk-writeback.md) | Accepted (refined by 0018) |
 | 0009 | [JSONB-based HITL rules engine](0009-jsonb-hitl-rules-engine.md) | Accepted |
 | 0010 | [Per-role LLM configuration](0010-per-role-llm-configuration.md) | Accepted (fallback §3 superseded by 0015) |
@@ -75,3 +75,5 @@ What costs do we accept? What do we gain? What becomes harder?
 | 0016 | [Sovereignty hybrid surface — drop MVP claim, prepare DB](0016-sovereignty-mode-hybrid.md) | Accepted |
 | 0017 | [Hash-chained audit log + DB role split](0017-audit-hash-chain.md) | Accepted |
 | 0018 | [Splunk writeback mode (`dual` vs `hec_only`)](0018-splunk-writeback-mode.md) | Accepted (refines 0008) |
+| 0019 | [MCP transport: `streamable_http`](0019-mcp-transport-streamable-http.md) | Accepted |
+| 0020 | [OCSF 1.3.0 validator: hand-rolled Pydantic v2](0020-ocsf-validator-handrolled-pydantic.md) | Accepted (refines 0007) |

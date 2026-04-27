@@ -36,12 +36,13 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 
 | Area | Lock |
 |---|---|
-| Framework | **LangGraph** + `langchain-anthropic` (or `langchain-openai` for OpenRouter) + `langchain-mcp-adapters` + `langgraph-checkpoint-postgres`. |
+| Framework | **LangGraph** + `langchain-anthropic` (or `langchain-openai` for OpenRouter) + `langchain-mcp-adapters` (>=0.2,<0.3) + `langgraph-checkpoint-postgres`. |
 | Why | Native `interrupt()` HITL + Postgres checkpointer + multi-agent runway. |
 | Tracing | LangSmith (SaaS, graph-native). |
-| MCP server library | Official `mcp` Python SDK. |
+| MCP server library | Official `mcp` Python SDK (>=1.27,<2 for FastMCP `streamable_http_app` + `@custom_route`). |
+| MCP transport | `streamable_http` for all SIEM MCP servers (current MCP-spec HTTP transport; replaces deprecated `sse`). See ADR-0019. |
 
-→ See ADR 0003, 0013
+→ See ADR 0003, 0013, 0019
 
 ## LLM routing
 
@@ -88,9 +89,9 @@ Snapshot of current architectural commitments. Immutable reasoning for each is i
 |---|---|
 | Threat model | MITRE ATT&CK (STIX 2.1 cache seeded into Postgres at build). |
 | Event schema | OCSF 1.3.0 (Splunk → OCSF in; OCSF Detection Finding out). |
-| Validator | `py-ocsf-models` pinned if supports 1.3.0; else hand-rolled Pydantic. |
+| Validator | **Hand-rolled Pydantic v2** in `libs/ocsf/`, scoped to OCSF Detection Finding (class_uid 2004) + dependent objects. `py-ocsf-models` rejected (targets 1.5.0 → drift). See ADR-0020. |
 
-→ See ADR 0007
+→ See ADR 0007, 0020
 
 ## Auth + secrets
 
