@@ -198,9 +198,7 @@ def _cleanup_incident(incident_id: UUID, investigation_id: UUID) -> None:
 
 
 async def _wipe_thread(database_url: str, thread_id: str) -> None:
-    async with AsyncPostgresSaver.from_conn_string(
-        _strip_psycopg_dsn(database_url)
-    ) as saver:
+    async with AsyncPostgresSaver.from_conn_string(_strip_psycopg_dsn(database_url)) as saver:
         await saver.adelete_thread(thread_id)
 
 
@@ -291,11 +289,24 @@ async def test_investigation_smoke_runs_to_verdict(
     assert usage_count_row is not None
     assert "investigation_started" in actions, actions
     # Either complete (happy path) or failed (model bailed) — both audit.
-    assert (
-        "investigation_complete" in actions or "investigation_failed" in actions
-    ), actions
+    assert "investigation_complete" in actions or "investigation_failed" in actions, actions
     # Per-attempt LLM ledger landed at least once per node (plan + draft = 2 minimum).
     assert usage_count_row[0] >= 2, usage_count_row[0]
+
+    if status == "done":
+        # Wk-7: happy path must walk through verdict_drafted → review →
+        # investigation_complete → manifest_uploaded. Manifest is best-effort
+        # (MinIO down → manifest_upload_failed instead) so accept either.
+        assert "verdict_drafted" in actions, actions
+        assert "review_started" in actions, actions
+        # Review is best-effort: either review_complete or review_skipped.
+        assert "review_complete" in actions or "review_skipped" in actions, actions
+        assert "manifest_uploaded" in actions or "manifest_upload_failed" in actions, actions
+        # Ordering invariant: investigation_complete precedes manifest_*.
+        if "manifest_uploaded" in actions:
+            assert actions.index("investigation_complete") < actions.index(
+                "manifest_uploaded"
+            ), actions
 
 
 # ---------------------------------------------------------------- crash-resume
@@ -364,13 +375,13 @@ async def test_investigation_smoke_resumes_after_inject_failure(
         await graph.ainvoke(None, config=config)
 
     # Plan must NOT re-fire — proves checkpoint replay.
-    assert nodes.node_call_counts["plan"] == plan_count_after_fail, (
-        f"plan re-ran on resume; counts: {dict(nodes.node_call_counts)}"
-    )
+    assert (
+        nodes.node_call_counts["plan"] == plan_count_after_fail
+    ), f"plan re-ran on resume; counts: {dict(nodes.node_call_counts)}"
     # Correlate ran at least once more (counter increments on entry; LangGraph
     # may retry the failed node before succeeding).
-    assert nodes.node_call_counts["correlate"] >= correlate_count_after_fail + 1, (
-        f"correlate did not re-run; counts: {dict(nodes.node_call_counts)}"
-    )
+    assert (
+        nodes.node_call_counts["correlate"] >= correlate_count_after_fail + 1
+    ), f"correlate did not re-run; counts: {dict(nodes.node_call_counts)}"
     # Draft verdict ran for the first time.
     assert nodes.node_call_counts["draft_verdict"] >= 1, dict(nodes.node_call_counts)

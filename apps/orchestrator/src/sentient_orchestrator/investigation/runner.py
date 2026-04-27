@@ -21,7 +21,7 @@ import json
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
@@ -36,9 +36,16 @@ from sentient_ocsf.detection_finding import (
     validate_detection_finding,
 )
 from sentient_orchestrator.investigation.audit import (
+    emit_budget_exceeded,
     emit_investigation_complete,
     emit_investigation_failed,
     emit_investigation_started,
+    emit_manifest_upload_failed,
+    emit_manifest_uploaded,
+)
+from sentient_orchestrator.investigation.evidence import (
+    build_evidence_manifest,
+    upload_manifest,
 )
 from sentient_orchestrator.investigation.graph import build_investigation_graph
 from sentient_orchestrator.investigation.mcp_client import build_mcp_client
@@ -46,7 +53,10 @@ from sentient_orchestrator.investigation.state import (
     InvestigationOutput,
     InvestigationState,
 )
-from sentient_orchestrator.llm.exceptions import FallbackChainExhausted
+from sentient_orchestrator.llm.exceptions import (
+    BudgetExceeded,
+    FallbackChainExhausted,
+)
 from sentient_orchestrator.mitre_lookup import fetch_technique_descriptions
 
 log = get_logger(__name__)
@@ -94,9 +104,7 @@ async def run_tier2_investigation(
     # 2. MITRE descriptions for the techniques flagged by triage.
     mitre_ids = list(triage_ctx.get("mitre_guesses", []) or [])
     with tenant_session(tenant_id) as conn:
-        mitre_descs = (
-            fetch_technique_descriptions(conn, mitre_ids) if mitre_ids else {}
-        )
+        mitre_descs = fetch_technique_descriptions(conn, mitre_ids) if mitre_ids else {}
 
     # 3. Run the graph under MCP + AsyncPostgresSaver lifecycles.
     db_url = _strip_psycopg_dsn(os.environ.get("DATABASE_URL", ""))
@@ -159,6 +167,32 @@ async def run_tier2_investigation(
             reason="fallback_chain_exhausted",
         )
         return
+    except BudgetExceeded as exc:
+        with tenant_session(tenant_id) as conn:
+            emit_budget_exceeded(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                role=exc.role,
+                total_cost_usd=exc.total_cost_usd,
+                cap_usd=exc.cap_usd,
+                total_tokens=exc.total_tokens,
+                token_cap=exc.token_cap,
+            )
+        # Wk-7 round-2 fix R-1: keep this string generic — cap config + running
+        # totals already flow through `emit_budget_exceeded` above with structured
+        # fields. Including them here would duplicate the leak into
+        # `audit_log.details.error_message`, which is a separate (RLS-scoped, but
+        # eventually UI-surfaced) channel.
+        await _finalize_inconclusive(
+            investigation_id=investigation_id,
+            tenant_id=tenant_id,
+            incident_id=incident_id,
+            error_type="BudgetExceeded",
+            error_message=f"per-investigation budget exceeded for role={exc.role}",
+            reason="budget_cap_exceeded",
+        )
+        return
     except Exception as exc:  # noqa: BLE001 — preserve audit chain
         await _finalize_inconclusive(
             investigation_id=investigation_id,
@@ -188,17 +222,32 @@ async def run_tier2_investigation(
         return
 
     verdict = InvestigationOutput.model_validate(draft)
+    review_output = final_state.get("review_output") if final_state else None
     await _finalize_done(
         investigation_id=investigation_id,
         tenant_id=tenant_id,
         incident_id=incident_id,
         verdict=verdict,
+        review=review_output,
     )
     log.info(
         "tier-2 investigation complete",
         investigation_id=str(investigation_id),
         verdict=verdict.verdict,
         confidence=verdict.confidence,
+    )
+
+    # Manifest upload is best-effort. The verdict is already finalized + the
+    # `investigation_complete` audit row is in the chain — a MinIO outage must
+    # not roll any of that back.
+    _try_upload_manifest(
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        incident_id=incident_id,
+        finding=finding,
+        final_state=cast(InvestigationState, final_state),
+        verdict=verdict,
+        review=review_output,
     )
 
 
@@ -213,14 +262,12 @@ def _claim_investigation(
     with tenant_session(tenant_id) as conn:
         # Pull triage context off the investigation row (wk-5 wrote these).
         inv_row = conn.execute(
-            text(
-                """
+            text("""
                 SELECT severity, confidence, mitre_techniques, summary,
                        inconclusive_reason
                   FROM investigations
                  WHERE id = :id
-                """
-            ),
+                """),
             {"id": str(investigation_id)},
         ).first()
         if inv_row is None:
@@ -231,12 +278,10 @@ def _claim_investigation(
 
         # Atomic claim of the incident row.
         result = conn.execute(
-            text(
-                """
+            text("""
                 UPDATE incidents SET status = 'investigating'
                  WHERE id = :id AND status = 'triaging'
-                """
-            ),
+                """),
             {"id": str(incident_id)},
         )
         if result.rowcount == 0:
@@ -254,14 +299,12 @@ def _claim_investigation(
 
         # Mark thread id + clear the pending flag.
         conn.execute(
-            text(
-                """
+            text("""
                 UPDATE investigations
                    SET langgraph_thread_id = :tid,
                        inconclusive_reason = NULL
                  WHERE id = :id
-                """
-            ),
+                """),
             {"id": str(investigation_id), "tid": thread_id},
         )
 
@@ -295,6 +338,7 @@ async def _finalize_done(
     tenant_id: UUID,
     incident_id: UUID,
     verdict: InvestigationOutput,
+    review: dict[str, Any] | None,
 ) -> None:
     completed_at = datetime.now(UTC)
     with tenant_session(tenant_id) as conn:
@@ -304,6 +348,12 @@ async def _finalize_done(
             verdict=verdict,
             completed_at=completed_at,
         )
+        if review is not None:
+            _update_investigation_with_review(
+                conn,
+                investigation_id=investigation_id,
+                review=review,
+            )
         conn.execute(
             text("UPDATE incidents SET status = 'done' WHERE id = :id"),
             {"id": str(incident_id)},
@@ -329,15 +379,13 @@ async def _finalize_inconclusive(
     completed_at = datetime.now(UTC)
     with tenant_session(tenant_id) as conn:
         conn.execute(
-            text(
-                """
+            text("""
                 UPDATE investigations
                    SET verdict = 'inconclusive',
                        inconclusive_reason = :reason,
                        completed_at = :completed_at
                  WHERE id = :id
-                """
-            ),
+                """),
             {
                 "id": str(investigation_id),
                 "reason": reason,
@@ -366,8 +414,7 @@ def _update_investigation_with_verdict(
     completed_at: datetime,
 ) -> None:
     conn.execute(
-        text(
-            """
+        text("""
             UPDATE investigations
                SET verdict = :verdict,
                    confidence = :confidence,
@@ -378,8 +425,7 @@ def _update_investigation_with_verdict(
                    inconclusive_reason = NULL,
                    completed_at = :completed_at
              WHERE id = :id
-            """
-        ),
+            """),
         {
             "id": str(investigation_id),
             "verdict": verdict.verdict,
@@ -391,6 +437,107 @@ def _update_investigation_with_verdict(
             "completed_at": completed_at,
         },
     )
+
+
+def _update_investigation_with_review(
+    conn: Connection,
+    *,
+    investigation_id: UUID,
+    review: dict[str, Any],
+) -> None:
+    """Wk-7. Persist review_status / notes / metadata. `review_notes` already
+    exists from initial schema (line 118 of 81e2d43b3ec0); `review_status` +
+    `review_metadata` arrive in `c1d8e3f4a9b2_wk7_cost_cap_review.py`.
+    """
+    conn.execute(
+        text("""
+            UPDATE investigations
+               SET review_status = :status,
+                   review_notes = :notes,
+                   review_metadata = CAST(:meta AS jsonb)
+             WHERE id = :id
+            """),
+        {
+            "id": str(investigation_id),
+            "status": review.get("status"),
+            "notes": review.get("notes"),
+            "meta": json.dumps(review),
+        },
+    )
+
+
+def _try_upload_manifest(
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    incident_id: UUID,
+    finding: DetectionFinding,
+    final_state: InvestigationState,
+    verdict: InvestigationOutput,
+    review: dict[str, Any] | None,
+) -> None:
+    """Wk-7. Best-effort manifest upload. Never raises.
+
+    Verdict is already finalized + `investigation_complete` is in the audit
+    chain by the time this runs. MinIO down → log + emit
+    `manifest_upload_failed`, leave `evidence_s3_key` NULL, move on.
+    """
+    try:
+        with tenant_session(tenant_id) as conn:
+            manifest = build_evidence_manifest(
+                conn=conn,
+                investigation_id=investigation_id,
+                tenant_id=tenant_id,
+                incident_id=incident_id,
+                finding=finding,
+                final_state=final_state,
+                verdict=verdict,
+                review=review,
+            )
+        bucket, key, size_bytes = upload_manifest(
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            manifest=manifest,
+        )
+        with tenant_session(tenant_id) as conn:
+            conn.execute(
+                text("UPDATE investigations SET evidence_s3_key = :k WHERE id = :id"),
+                {"k": key, "id": str(investigation_id)},
+            )
+            emit_manifest_uploaded(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                bucket=bucket,
+                key=key,
+                size_bytes=size_bytes,
+            )
+        log.info(
+            "evidence manifest uploaded",
+            investigation_id=str(investigation_id),
+            bucket=bucket,
+            key=key,
+            size_bytes=size_bytes,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; verdict already done
+        log.exception(
+            "evidence manifest upload failed; verdict still finalized",
+            investigation_id=str(investigation_id),
+        )
+        try:
+            with tenant_session(tenant_id) as conn:
+                emit_manifest_upload_failed(
+                    conn,
+                    tenant_id=tenant_id,
+                    investigation_id=investigation_id,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:500],
+                )
+        except Exception:  # noqa: BLE001 — ledger write failed too; just log.
+            log.exception(
+                "manifest_upload_failed audit emit also failed",
+                investigation_id=str(investigation_id),
+            )
 
 
 def _pg_text_array(items: list[str]) -> str:

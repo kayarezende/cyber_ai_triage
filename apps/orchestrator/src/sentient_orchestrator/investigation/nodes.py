@@ -38,6 +38,8 @@ from sentient_common.logging import get_logger
 from sentient_orchestrator.investigation import audit
 from sentient_orchestrator.investigation.prompt import (
     build_initial_user_message,
+    build_review_system_prompt,
+    build_review_user_message,
     build_system_prompt,
 )
 from sentient_orchestrator.investigation.sanitizer import sanitize_untrusted
@@ -45,6 +47,11 @@ from sentient_orchestrator.investigation.state import (
     MAX_TOOL_CALLS,
     InvestigationOutput,
     InvestigationState,
+    ReviewOutput,
+)
+from sentient_orchestrator.llm.exceptions import (
+    BudgetExceeded,
+    FallbackChainExhausted,
 )
 from sentient_orchestrator.llm.router import LLMResult, LLMRouter
 
@@ -58,6 +65,7 @@ node_call_counts: dict[str, int] = {
     "tools": 0,
     "correlate": 0,
     "draft_verdict": 0,
+    "review": 0,
 }
 
 #: Env var that triggers a synthetic failure inside a named node. Used by
@@ -149,9 +157,7 @@ def _serialize_assistant_message(content: str, result: LLMResult) -> dict[str, A
 # ----------------------------------------------------------------- nodes
 
 
-async def plan_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def plan_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """First LLM call: ingest finding + state hypotheses to test."""
     node_call_counts["plan"] += 1
     _maybe_inject_failure("plan")
@@ -172,8 +178,20 @@ async def plan_node(
     user = build_initial_user_message(
         finding=finding, triage_ctx=triage_ctx, mitre_descs=mitre_descs
     )
+    # Wk-7: cache the system prompt only — it carries the static methodology
+    # + tool descriptions + MITRE block (the latter resolves to the same
+    # T-codes within a session for repeat findings of the same class) so a
+    # cache hit on it is the high-value breakpoint. The initial user message
+    # embeds the per-investigation OCSF finding + triage hand-off — those
+    # fields vary per investigation, so caching that block burns one of
+    # Anthropic's 4 cache breakpoints for ~0% hit rate.
+    # The `cacheable` field is consumed by
+    # `call_chat_completion._apply_cache_markers` which rewrites string
+    # content into the Anthropic ephemeral cache-block wire shape and
+    # strips the flag before sending. Non-Anthropic backends (Gemini,
+    # OpenAI) ignore the marker.
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system},
+        {"role": "system", "content": system, "cacheable": True},
         {"role": "user", "content": user},
     ]
 
@@ -205,9 +223,7 @@ async def plan_node(
     }
 
 
-async def agent_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def agent_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """Tool-using LLM call: may emit tool_calls or final reasoning.
 
     `tool_choice="auto"` (default) — never `tool_choice="<name>"` per wk-2
@@ -251,9 +267,7 @@ async def agent_node(
     return {"messages": [assistant], "tool_call_count": new_count}
 
 
-async def tools_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def tools_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """Dispatch each tool_call from the last assistant message.
 
     Sanitizes results before appending ToolMessages. Audits one row per call.
@@ -340,9 +354,7 @@ async def tools_node(
     return {"messages": new_messages}
 
 
-async def correlate_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def correlate_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """LLM call: summarize evidence + cross-reference triage techniques."""
     node_call_counts["correlate"] += 1
     _maybe_inject_failure("correlate")
@@ -388,9 +400,7 @@ async def correlate_node(
     return {"messages": [messages[-1], assistant]}
 
 
-async def draft_verdict_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def draft_verdict_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """Final LLM call with `response_schema=InvestigationOutput`."""
     node_call_counts["draft_verdict"] += 1
     _maybe_inject_failure("draft_verdict")
@@ -446,6 +456,138 @@ async def draft_verdict_node(
     return {"draft_verdict": verdict.model_dump(), "messages": [messages[-1]]}
 
 
+async def review_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
+    """Wk-7. Critic LLM call: audit the draft verdict.
+
+    Best-effort: if the review LLM call fails (FallbackChainExhausted /
+    BudgetExceeded / unhandled exception), DO NOT propagate. The verdict is
+    already drafted; review is annotation. Emit `review_skipped` and return
+    a skipped-shape `review_output` so downstream persistence has a value.
+
+    Does NOT mutate the draft verdict; returns only `review_output`.
+    """
+    node_call_counts["review"] += 1
+    _maybe_inject_failure("review")
+
+    tenant_id, investigation_id = _ids_from_config(config)
+    configurable = config.get("configurable") or {}
+    finding = configurable["finding"]
+
+    draft = state.get("draft_verdict")
+    if not draft:
+        log.warning(
+            "review_node invoked without draft_verdict; skipping",
+            investigation_id=str(investigation_id),
+        )
+        return {
+            "review_output": {
+                "status": "skipped",
+                "notes": "no_draft_verdict_to_review",
+            }
+        }
+
+    system = build_review_system_prompt()
+    user = build_review_user_message(finding=finding, draft_verdict=draft)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system, "cacheable": True},
+        {"role": "user", "content": user},
+    ]
+
+    try:
+        with tenant_session(tenant_id) as conn:
+            router = LLMRouter(tenant_id, conn)
+            audit.emit_review_started(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                model_used="(router-resolved)",
+            )
+            start = time.monotonic()
+            result = await router.call(
+                role="review",
+                messages=messages,
+                investigation_id=investigation_id,
+                response_schema=ReviewOutput,
+            )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            audit.emit_llm_call(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                phase="review",
+                model_used=result.model_used,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cached_tokens=result.cached_tokens,
+                latency_ms=latency_ms,
+            )
+            if not isinstance(result.parsed, ReviewOutput):
+                msg = "review_node expected parsed ReviewOutput"
+                raise RuntimeError(msg)
+            review = result.parsed
+            audit.emit_review_complete(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                status=review.status,
+                hallucination_risk=review.hallucination_risk,
+                confidence_assessment=review.confidence_assessment,
+                flagged_claim_count=len(review.flagged_claims),
+            )
+        return {"review_output": review.model_dump()}
+    except (FallbackChainExhausted, BudgetExceeded) as exc:
+        # Best-effort: review failure does not fail the investigation.
+        reason = type(exc).__name__
+        log.warning(
+            "review_node skipped due to LLM failure",
+            investigation_id=str(investigation_id),
+            reason=reason,
+        )
+        try:
+            with tenant_session(tenant_id) as conn:
+                audit.emit_review_skipped(
+                    conn,
+                    tenant_id=tenant_id,
+                    investigation_id=investigation_id,
+                    reason=reason,
+                )
+        except Exception:  # noqa: BLE001 — audit failure also best-effort
+            log.exception(
+                "review_skipped audit emit failed",
+                investigation_id=str(investigation_id),
+            )
+        return {
+            "review_output": {
+                "status": "skipped",
+                "notes": f"review_role_unavailable:{reason}",
+            }
+        }
+    except Exception as exc:  # noqa: BLE001 — unhandled review failure
+        log.exception(
+            "review_node unhandled exception; skipping review",
+            investigation_id=str(investigation_id),
+        )
+        try:
+            with tenant_session(tenant_id) as conn:
+                audit.emit_review_skipped(
+                    conn,
+                    tenant_id=tenant_id,
+                    investigation_id=investigation_id,
+                    reason=f"{type(exc).__name__}: {exc!s:.200}",
+                )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "review_skipped audit emit failed",
+                investigation_id=str(investigation_id),
+            )
+        return {
+            "review_output": {
+                "status": "skipped",
+                "notes": f"review_unhandled:{type(exc).__name__}",
+            }
+        }
+
+
 # ------------------------------------------------------------- routing
 
 
@@ -473,6 +615,7 @@ __all__ = [
     "node_call_counts",
     "plan_node",
     "reset_node_call_counts",
+    "review_node",
     "route_after_agent",
     "tools_node",
     "tools_to_openai_schema",

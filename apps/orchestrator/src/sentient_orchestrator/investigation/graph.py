@@ -6,12 +6,16 @@ Topology:
                           │                         │
                           │                  (back to agent)
                           │
-                          └──(no tool_calls / cap)──→ correlate → draft_verdict → END
+                          └──(no tool_calls / cap)──→ correlate → draft_verdict → review → END
 
-The `tools` node loops back to `agent` so the model can iterate (observe
-tool result → reason → call again). The `route_after_agent` conditional
-edge force-routes to `correlate` once `state.tool_call_count >= MAX_TOOL_CALLS`,
-preventing runaway loops.
+`tools` node loops back to `agent` so the model can iterate (observe tool
+result → reason → call again). `route_after_agent` force-routes to
+`correlate` once `state.tool_call_count >= MAX_TOOL_CALLS`, preventing
+runaway loops.
+
+Wk-7: `review` is the second LLM pass — annotation only, never overrides
+the verdict. Failures inside `review_node` are absorbed (skipped), the
+verdict is already drafted by the time we get here.
 
 `build_investigation_graph` returns the uncompiled StateGraph builder. Caller
 wraps with the PostgresSaver checkpointer:
@@ -29,6 +33,7 @@ from sentient_orchestrator.investigation.nodes import (
     correlate_node,
     draft_verdict_node,
     plan_node,
+    review_node,
     route_after_agent,
     tools_node,
 )
@@ -43,6 +48,7 @@ def build_investigation_graph() -> StateGraph[InvestigationState]:
     builder.add_node("tools", tools_node)
     builder.add_node("correlate", correlate_node)
     builder.add_node("draft_verdict", draft_verdict_node)
+    builder.add_node("review", review_node)
 
     builder.add_edge(START, "plan")
     builder.add_edge("plan", "agent")
@@ -53,7 +59,8 @@ def build_investigation_graph() -> StateGraph[InvestigationState]:
     )
     builder.add_edge("tools", "agent")
     builder.add_edge("correlate", "draft_verdict")
-    builder.add_edge("draft_verdict", END)
+    builder.add_edge("draft_verdict", "review")
+    builder.add_edge("review", END)
     return builder
 
 

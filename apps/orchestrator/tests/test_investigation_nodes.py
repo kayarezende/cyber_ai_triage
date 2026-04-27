@@ -123,6 +123,9 @@ def emit_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any
     monkeypatch.setattr(nodes.audit, "emit_llm_call", _track("llm_call"))
     monkeypatch.setattr(nodes.audit, "emit_tool_call", _track("tool_call"))
     monkeypatch.setattr(nodes.audit, "emit_verdict_drafted", _track("verdict_drafted"))
+    monkeypatch.setattr(nodes.audit, "emit_review_started", _track("review_started"))
+    monkeypatch.setattr(nodes.audit, "emit_review_complete", _track("review_complete"))
+    monkeypatch.setattr(nodes.audit, "emit_review_skipped", _track("review_skipped"))
     return calls
 
 
@@ -224,9 +227,7 @@ async def test_agent_node_passes_tools_and_serializes_tool_calls(
     patched_llm["next_result"] = _llm_result(
         content="",
         tool_calls=(
-            OpenRouterToolCall(
-                id="call_1", name="siem_query", arguments={"spl": "index=main"}
-            ),
+            OpenRouterToolCall(id="call_1", name="siem_query", arguments={"spl": "index=main"}),
         ),
     )
 
@@ -494,9 +495,7 @@ async def test_draft_verdict_node_returns_parsed_output(
         evidence=["spl: index=main user=alice failed_count>10"],
         reasoning="Many failures from one IP, then one success.",
     )
-    patched_llm["next_result"] = _llm_result(
-        content=parsed.model_dump_json(), parsed=parsed
-    )
+    patched_llm["next_result"] = _llm_result(content=parsed.model_dump_json(), parsed=parsed)
 
     state = {"messages": [{"role": "user", "content": "evidence"}]}
     delta = await draft_verdict_node(state, config=_config())  # type: ignore[arg-type]
@@ -519,9 +518,7 @@ async def test_draft_verdict_node_rejects_unparsed_result(
     if it ever returns a result with parsed=None, we treat that as a bug."""
     patched_llm["next_result"] = _llm_result(content="", parsed=None)
     with pytest.raises(RuntimeError, match="parsed InvestigationOutput"):
-        await draft_verdict_node(
-            {"messages": []}, config=_config()  # type: ignore[arg-type]
-        )
+        await draft_verdict_node({"messages": []}, config=_config())  # type: ignore[arg-type]
 
 
 # ------------------------------------------------------------- helpers
@@ -565,11 +562,177 @@ def test_inject_failure_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_serialize_assistant_message_emits_json_string_args() -> None:
     """Confirm tool_calls.arguments goes back over the wire as a JSON STRING."""
     result = _llm_result(
-        tool_calls=(
-            OpenRouterToolCall(id="x", name="t", arguments={"a": 1, "b": [2, 3]}),
-        )
+        tool_calls=(OpenRouterToolCall(id="x", name="t", arguments={"a": 1, "b": [2, 3]}),)
     )
     msg = nodes._serialize_assistant_message("hi", result)
     args = msg["tool_calls"][0]["function"]["arguments"]
     assert isinstance(args, str)
     assert json.loads(args) == {"a": 1, "b": [2, 3]}
+
+
+# ------------------------------------------------------------- wk-7 review_node
+
+
+from sentient_orchestrator.investigation.nodes import review_node  # noqa: E402
+from sentient_orchestrator.investigation.state import ReviewOutput  # noqa: E402
+from sentient_orchestrator.llm.exceptions import (  # noqa: E402
+    BudgetExceeded,
+    FallbackChainExhausted,
+)
+
+
+def _draft_dict() -> dict[str, Any]:
+    return {
+        "verdict": "true_positive",
+        "confidence": 85,
+        "severity": "high",
+        "mitre_techniques": ["T1059.001"],
+        "summary": "PowerShell C2 confirmed.",
+        "evidence": ["spl: index=main process=powershell"],
+        "reasoning": "encoded -enc + outbound HTTPS to suspicious domain.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_review_node_happy_path(
+    patched_llm: dict[str, Any], emit_calls: list[tuple[str, dict[str, Any]]]
+) -> None:
+    """Review LLM returns a parsed ReviewOutput → state delta carries review_output."""
+    from sentient_ocsf.splunk_mapper import map_notable_to_ocsf
+
+    finding = map_notable_to_ocsf(
+        {"search_name": "T", "urgency": "high", "_time": "1700000000.000"},
+        finding_uid="fid-review",
+    )
+    review = ReviewOutput(
+        status="approved",
+        hallucination_risk="low",
+        confidence_assessment="well_calibrated",
+        notes="evidence supports verdict.",
+        flagged_claims=[],
+    )
+    patched_llm["next_result"] = _llm_result(parsed=review)
+
+    config = _config(finding=finding)
+    state = {"draft_verdict": _draft_dict()}
+
+    delta = await review_node(state, config=config)  # type: ignore[arg-type]
+
+    assert delta["review_output"]["status"] == "approved"
+    assert delta["review_output"]["hallucination_risk"] == "low"
+    assert nodes.node_call_counts["review"] == 1
+    assert any(name == "review_started" for name, _ in emit_calls)
+    assert any(name == "review_complete" for name, _ in emit_calls)
+    rc = next(k for n, k in emit_calls if n == "review_complete")
+    assert rc["status"] == "approved"
+    assert rc["flagged_claim_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_review_node_flagged_with_claims(
+    patched_llm: dict[str, Any], emit_calls: list[tuple[str, dict[str, Any]]]
+) -> None:
+    """Review flagged → flagged_claim_count surfaces in audit row."""
+    from sentient_ocsf.splunk_mapper import map_notable_to_ocsf
+
+    finding = map_notable_to_ocsf(
+        {"search_name": "T", "urgency": "high", "_time": "1700000000.000"},
+        finding_uid="fid-review-2",
+    )
+    review = ReviewOutput(
+        status="flagged",
+        hallucination_risk="medium",
+        confidence_assessment="overconfident",
+        notes="claim X has no SPL backing.",
+        flagged_claims=["claim X is unsupported"],
+    )
+    patched_llm["next_result"] = _llm_result(parsed=review)
+    delta = await review_node(
+        {"draft_verdict": _draft_dict()},  # type: ignore[arg-type]
+        config=_config(finding=finding),
+    )
+    assert delta["review_output"]["status"] == "flagged"
+    assert delta["review_output"]["flagged_claims"] == ["claim X is unsupported"]
+    rc = next(k for n, k in emit_calls if n == "review_complete")
+    assert rc["flagged_claim_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_review_node_fallback_exhausted_yields_skipped(
+    monkeypatch: pytest.MonkeyPatch, emit_calls: list[tuple[str, dict[str, Any]]]
+) -> None:
+    """FallbackChainExhausted in review → skipped status, no propagation."""
+    from sentient_ocsf.splunk_mapper import map_notable_to_ocsf
+
+    finding = map_notable_to_ocsf(
+        {"search_name": "T", "urgency": "high", "_time": "1700000000.000"},
+        finding_uid="fid-review-3",
+    )
+
+    class _Router:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def call(self, **_kw: Any) -> Any:
+            raise FallbackChainExhausted(role="review", attempts=["m1", "m2"])
+
+    monkeypatch.setattr(nodes, "LLMRouter", _Router)
+    monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+
+    delta = await review_node(
+        {"draft_verdict": _draft_dict()},  # type: ignore[arg-type]
+        config=_config(finding=finding),
+    )
+    assert delta["review_output"]["status"] == "skipped"
+    assert "FallbackChainExhausted" in delta["review_output"]["notes"]
+    assert any(name == "review_skipped" for name, _ in emit_calls)
+
+
+@pytest.mark.asyncio
+async def test_review_node_budget_exceeded_yields_skipped(
+    monkeypatch: pytest.MonkeyPatch, emit_calls: list[tuple[str, dict[str, Any]]]
+) -> None:
+    """BudgetExceeded inside review → skipped, never propagates."""
+    from sentient_ocsf.splunk_mapper import map_notable_to_ocsf
+
+    finding = map_notable_to_ocsf(
+        {"search_name": "T", "urgency": "high", "_time": "1700000000.000"},
+        finding_uid="fid-review-4",
+    )
+
+    class _Router:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def call(self, **_kw: Any) -> Any:
+            raise BudgetExceeded(
+                role="review",
+                total_cost_usd="0.50",
+                cap_usd="0.50",
+                total_tokens=999,
+                token_cap=1000,
+            )
+
+    monkeypatch.setattr(nodes, "LLMRouter", _Router)
+    monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+
+    delta = await review_node(
+        {"draft_verdict": _draft_dict()},  # type: ignore[arg-type]
+        config=_config(finding=finding),
+    )
+    assert delta["review_output"]["status"] == "skipped"
+    assert any(name == "review_skipped" for name, _ in emit_calls)
+
+
+@pytest.mark.asyncio
+async def test_review_node_no_draft_skips() -> None:
+    """No draft_verdict in state (e.g. graph misuse) → safe skip."""
+    from sentient_ocsf.splunk_mapper import map_notable_to_ocsf
+
+    finding = map_notable_to_ocsf(
+        {"search_name": "T", "urgency": "high", "_time": "1700000000.000"},
+        finding_uid="fid-review-5",
+    )
+    delta = await review_node({}, config=_config(finding=finding))  # type: ignore[arg-type]
+    assert delta["review_output"]["status"] == "skipped"
+    assert delta["review_output"]["notes"] == "no_draft_verdict_to_review"

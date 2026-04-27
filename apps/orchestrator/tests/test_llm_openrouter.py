@@ -13,6 +13,7 @@ from sentient_orchestrator.llm.openrouter import (
     OPENROUTER_URL,
     X_TITLE,
     OpenRouterToolCall,
+    _apply_cache_markers,
     call_chat_completion,
 )
 
@@ -554,3 +555,114 @@ async def test_tool_arguments_empty_string_treated_as_empty_dict() -> None:
             timeout=1.0,
         )
     assert response.tool_calls[0].arguments == {}
+
+
+# --------------------------------------------------------------- wk-7 cache markers
+
+
+def test_apply_cache_markers_string_to_block_array() -> None:
+    """cacheable=True + string content → 1-block content array with cache_control."""
+    rewritten = _apply_cache_markers(
+        [
+            {"role": "system", "content": "long stable system prompt", "cacheable": True},
+            {"role": "user", "content": "incident facts", "cacheable": True},
+        ]
+    )
+    assert len(rewritten) == 2
+    assert "cacheable" not in rewritten[0]
+    assert rewritten[0]["content"] == [
+        {
+            "type": "text",
+            "text": "long stable system prompt",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    assert rewritten[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert rewritten[0]["role"] == "system"
+
+
+def test_apply_cache_markers_skips_unflagged() -> None:
+    """Unflagged messages pass through unchanged (sans cacheable key)."""
+    rewritten = _apply_cache_markers(
+        [
+            {"role": "system", "content": "x", "cacheable": True},
+            {"role": "user", "content": "y"},  # no cacheable
+            {"role": "assistant", "content": "z"},
+        ]
+    )
+    assert isinstance(rewritten[0]["content"], list)
+    assert rewritten[1] == {"role": "user", "content": "y"}
+    assert rewritten[2] == {"role": "assistant", "content": "z"}
+
+
+def test_apply_cache_markers_strips_flag_when_false() -> None:
+    """cacheable=False is also stripped — leaves no leak."""
+    rewritten = _apply_cache_markers([{"role": "user", "content": "hi", "cacheable": False}])
+    assert "cacheable" not in rewritten[0]
+    assert rewritten[0]["content"] == "hi"  # unchanged
+
+
+def test_apply_cache_markers_existing_block_array() -> None:
+    """Caller-supplied block-array content gets cache_control on LAST text block."""
+    rewritten = _apply_cache_markers(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "preamble"},
+                    {"type": "text", "text": "main"},
+                ],
+                "cacheable": True,
+            }
+        ]
+    )
+    blocks = rewritten[0]["content"]
+    assert "cache_control" not in blocks[0]
+    assert blocks[1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_apply_cache_markers_does_not_mutate_caller() -> None:
+    """Defensive copy: caller's message dict must not gain cache_control."""
+    original = {"role": "system", "content": "x", "cacheable": True}
+    _apply_cache_markers([original])
+    assert original == {"role": "system", "content": "x", "cacheable": True}
+
+
+def test_apply_cache_markers_assistant_with_tool_calls_passthrough() -> None:
+    """Assistant messages typically aren't flagged; if not flagged, pass through."""
+    msg = {
+        "role": "assistant",
+        "content": "calling tool",
+        "tool_calls": [{"id": "x", "type": "function", "function": {}}],
+    }
+    rewritten = _apply_cache_markers([msg])
+    assert rewritten[0] == msg
+
+
+@pytest.mark.asyncio
+async def test_call_chat_completion_strips_cacheable_field_on_wire() -> None:
+    """End-to-end: the `cacheable` key must NOT be present in the body sent."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_ok_payload())
+
+    async with _make_client(handler) as client:
+        await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[
+                {"role": "system", "content": "sys", "cacheable": True},
+                {"role": "user", "content": "u"},
+            ],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+
+    sent = captured["body"]["messages"]
+    assert "cacheable" not in sent[0]
+    assert sent[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert sent[1] == {"role": "user", "content": "u"}

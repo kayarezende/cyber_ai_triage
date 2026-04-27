@@ -176,12 +176,150 @@ def emit_investigation_failed(
     )
 
 
+def emit_budget_exceeded(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    role: str,
+    total_cost_usd: Any,
+    cap_usd: Any,
+    total_tokens: int | None,
+    token_cap: int | None,
+) -> None:
+    """Wk-7. One row when `LLMRouter._check_budget` raises pre-call."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="budget_exceeded",
+        details={
+            "role": role,
+            "total_cost_usd": str(total_cost_usd) if total_cost_usd is not None else None,
+            "cap_usd": str(cap_usd) if cap_usd is not None else None,
+            "total_tokens": total_tokens,
+            "token_cap": token_cap,
+        },
+    )
+
+
+def emit_review_started(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    model_used: str,
+) -> None:
+    """Wk-7. Review-role node entry."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="review_started",
+        details={"model_used": model_used},
+    )
+
+
+def emit_review_complete(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    status: str,
+    hallucination_risk: str,
+    confidence_assessment: str,
+    flagged_claim_count: int,
+) -> None:
+    """Wk-7. Review-role node exit (approved or flagged)."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="review_complete",
+        details={
+            "status": status,
+            "hallucination_risk": hallucination_risk,
+            "confidence_assessment": confidence_assessment,
+            "flagged_claim_count": flagged_claim_count,
+        },
+    )
+
+
+def emit_review_skipped(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    reason: str,
+) -> None:
+    """Wk-7. Review-role best-effort failure (FallbackChainExhausted etc)."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="review_skipped",
+        details=walk_and_sanitize({"reason": reason}, max_chars=_AUDIT_FIELD_CHARS),
+    )
+
+
+def emit_manifest_uploaded(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    bucket: str,
+    key: str,
+    size_bytes: int,
+) -> None:
+    """Wk-7. Evidence manifest landed in MinIO."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="manifest_uploaded",
+        details={"bucket": bucket, "key": key, "size_bytes": size_bytes},
+    )
+
+
+def emit_manifest_upload_failed(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    error_type: str,
+    error_message: str,
+) -> None:
+    """Wk-7. MinIO upload failed; verdict already finalized — best-effort."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="manifest_upload_failed",
+        details=walk_and_sanitize(
+            {"error_type": error_type, "error_message": error_message},
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
 __all__ = [
     "ACTOR",
+    "emit_budget_exceeded",
     "emit_investigation_complete",
     "emit_investigation_failed",
     "emit_investigation_started",
     "emit_llm_call",
+    "emit_manifest_upload_failed",
+    "emit_manifest_uploaded",
+    "emit_review_complete",
+    "emit_review_skipped",
+    "emit_review_started",
     "emit_tool_call",
     "emit_verdict_drafted",
 ]

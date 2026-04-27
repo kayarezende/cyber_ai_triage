@@ -24,7 +24,10 @@ from sentient_orchestrator.investigation.runner import (
     run_tier2_investigation,
 )
 from sentient_orchestrator.investigation.state import InvestigationOutput
-from sentient_orchestrator.llm.exceptions import FallbackChainExhausted
+from sentient_orchestrator.llm.exceptions import (
+    BudgetExceeded,
+    FallbackChainExhausted,
+)
 
 TENANT = UUID("11111111-1111-1111-1111-111111111111")
 INCIDENT = UUID("22222222-2222-2222-2222-222222222222")
@@ -114,9 +117,7 @@ def fake_conn() -> _FakeConn:
 
 
 @pytest.fixture
-def patch_session(
-    monkeypatch: pytest.MonkeyPatch, fake_conn: _FakeConn
-) -> _FakeConn:
+def patch_session(monkeypatch: pytest.MonkeyPatch, fake_conn: _FakeConn) -> _FakeConn:
     @contextmanager
     def session(_tid: UUID) -> Any:
         yield fake_conn
@@ -135,15 +136,10 @@ def audit_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, An
 
         return _f
 
-    monkeypatch.setattr(
-        runner_mod, "emit_investigation_started", _track("started")
-    )
-    monkeypatch.setattr(
-        runner_mod, "emit_investigation_complete", _track("complete")
-    )
-    monkeypatch.setattr(
-        runner_mod, "emit_investigation_failed", _track("failed")
-    )
+    monkeypatch.setattr(runner_mod, "emit_investigation_started", _track("started"))
+    monkeypatch.setattr(runner_mod, "emit_investigation_complete", _track("complete"))
+    monkeypatch.setattr(runner_mod, "emit_investigation_failed", _track("failed"))
+    monkeypatch.setattr(runner_mod, "emit_budget_exceeded", _track("budget"))
     return calls
 
 
@@ -196,16 +192,24 @@ def patch_graph(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 @pytest.fixture
 def patch_mitre(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        runner_mod, "fetch_technique_descriptions", lambda _conn, _ids: {}
-    )
+    monkeypatch.setattr(runner_mod, "fetch_technique_descriptions", lambda _conn, _ids: {})
+
+
+@pytest.fixture(autouse=True)
+def patch_manifest(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """No-op the manifest upload path. Capture invocations for assertion."""
+    calls: list[dict[str, Any]] = []
+
+    def _capture(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(runner_mod, "_try_upload_manifest", _capture)
+    return calls
 
 
 @pytest.fixture
 def env_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/db"
-    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/db")
 
 
 # ---------------------------------------------------------------- happy path
@@ -232,9 +236,7 @@ async def test_run_tier2_happy_path(
     )
     patch_graph["final_state"] = {"draft_verdict": verdict.model_dump()}
 
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
 
     sql_blob = " ".join(q[0] for q in patch_session.queries)
     assert "SET status = 'investigating'" in sql_blob
@@ -242,13 +244,8 @@ async def test_run_tier2_happy_path(
     assert "ocsf_output" in sql_blob
 
     # Verdict serialized to ocsf_output JSONB column.
-    update_calls = [
-        params for sql, params in patch_session.queries
-        if "ocsf_output" in sql
-    ]
-    assert any(
-        json.loads(p["ocsf"])["verdict"] == "true_positive" for p in update_calls
-    )
+    update_calls = [params for sql, params in patch_session.queries if "ocsf_output" in sql]
+    assert any(json.loads(p["ocsf"])["verdict"] == "true_positive" for p in update_calls)
 
     audit_actions = [name for name, _ in audit_calls]
     assert "started" in audit_actions
@@ -277,9 +274,7 @@ async def test_passes_finding_and_tools_via_config(
             reasoning="r",
         ).model_dump()
     }
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     cfg = patch_graph["last_config"]["configurable"]
     assert cfg["thread_id"].startswith("inv-")
     assert cfg["tenant_id"] == str(TENANT)
@@ -309,9 +304,7 @@ async def test_skips_when_already_claimed(
         yield fake
 
     monkeypatch.setattr(runner_mod, "tenant_session", session)
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     # No started/complete/failed audit emitted — early return before audit.
     assert audit_calls == []
 
@@ -333,9 +326,7 @@ async def test_skips_when_not_pending_tier2(
         yield fake
 
     monkeypatch.setattr(runner_mod, "tenant_session", session)
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     assert audit_calls == []
 
 
@@ -362,9 +353,7 @@ async def test_fallback_exhausted_finalizes_inconclusive(
 
     monkeypatch.setattr(runner_mod, "build_investigation_graph", lambda: _Builder())
 
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
 
     sql_blob = " ".join(q[0] for q in patch_session.queries)
     assert "SET status = 'inconclusive'" in sql_blob
@@ -372,6 +361,59 @@ async def test_fallback_exhausted_finalizes_inconclusive(
     assert failed
     assert failed[0]["error_type"] == "FallbackChainExhausted"
     assert failed[0]["reason"] == "fallback_chain_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_budget_exceeded_finalizes_inconclusive(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_session: _FakeConn,
+    audit_calls: list[tuple[str, dict[str, Any]]],
+    patch_mcp: list[MagicMock],
+    patch_checkpointer: None,
+    patch_mitre: None,
+    env_db: None,
+) -> None:
+    """BudgetExceeded mid-graph → inconclusive + budget_cap_exceeded reason + audit row."""
+
+    class _Graph:
+        async def ainvoke(self, *_a: Any, **_kw: Any) -> dict[str, Any]:
+            raise BudgetExceeded(
+                role="investigation",
+                total_cost_usd="0.55",
+                cap_usd="0.50",
+                total_tokens=1500,
+                token_cap=1000,
+            )
+
+    class _Builder:
+        def compile(self, **_kw: Any) -> _Graph:
+            return _Graph()
+
+    monkeypatch.setattr(runner_mod, "build_investigation_graph", lambda: _Builder())
+
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
+
+    sql_blob = " ".join(q[0] for q in patch_session.queries)
+    assert "SET status = 'inconclusive'" in sql_blob
+    failed = [k for n, k in audit_calls if n == "failed"]
+    assert failed
+    assert failed[0]["error_type"] == "BudgetExceeded"
+    assert failed[0]["reason"] == "budget_cap_exceeded"
+    # Wk-7 round-2 fix R-1: cap config must NOT leak into the
+    # `investigation_failed` audit row's `error_message`. Cap details flow
+    # only through the structured `budget_exceeded` row below.
+    err_msg = failed[0]["error_message"]
+    assert "cap_usd=" not in err_msg, err_msg
+    assert "token_cap=" not in err_msg, err_msg
+    assert "0.50" not in err_msg, err_msg
+    assert "1000" not in err_msg, err_msg
+    budget = [k for n, k in audit_calls if n == "budget"]
+    assert budget
+    assert budget[0]["role"] == "investigation"
+    assert budget[0]["total_tokens"] == 1500
+    # Cap config IS expected on the structured budget_exceeded audit row.
+    assert budget[0]["cap_usd"] == "0.50"
+    assert budget[0]["token_cap"] == 1000
 
 
 @pytest.mark.asyncio
@@ -394,9 +436,7 @@ async def test_unhandled_exception_finalizes_inconclusive(
             return _Graph()
 
     monkeypatch.setattr(runner_mod, "build_investigation_graph", lambda: _Builder())
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     failed = [k for n, k in audit_calls if n == "failed"]
     assert failed
     assert failed[0]["error_type"] == "RuntimeError"
@@ -411,9 +451,7 @@ async def test_missing_database_url_finalizes_inconclusive(
     patch_mitre: None,
 ) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     failed = [k for n, k in audit_calls if n == "failed"]
     assert failed
     assert failed[0]["reason"] == "config_missing_database_url"
@@ -431,9 +469,7 @@ async def test_missing_verdict_finalizes_inconclusive(
 ) -> None:
     """Graph completes but draft_verdict slot is empty → inconclusive."""
     patch_graph["final_state"] = {"draft_verdict": None}
-    await run_tier2_investigation(
-        investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT
-    )
+    await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     failed = [k for n, k in audit_calls if n == "failed"]
     assert failed
     assert failed[0]["reason"] == "no_verdict_emitted"
@@ -456,12 +492,6 @@ def test_make_thread_id_starts_with_inv() -> None:
 
 
 def test_strip_psycopg_dsn() -> None:
-    assert (
-        _strip_psycopg_dsn("postgresql+psycopg://u:p@h:5432/db")
-        == "postgresql://u:p@h:5432/db"
-    )
+    assert _strip_psycopg_dsn("postgresql+psycopg://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"
     # No-op on already-stripped form.
-    assert (
-        _strip_psycopg_dsn("postgresql://u:p@h:5432/db")
-        == "postgresql://u:p@h:5432/db"
-    )
+    assert _strip_psycopg_dsn("postgresql://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"

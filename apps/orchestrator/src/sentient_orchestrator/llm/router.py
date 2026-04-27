@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -28,19 +29,24 @@ from sqlalchemy.engine import Connection
 
 from sentient_common.crypto import decrypt
 from sentient_common.logging import get_logger
-from sentient_orchestrator.llm.exceptions import FallbackChainExhausted
+from sentient_orchestrator.llm.exceptions import (
+    BudgetExceeded,
+    FallbackChainExhausted,
+)
 from sentient_orchestrator.llm.openrouter import (
     OpenRouterResponse,
     OpenRouterToolCall,
     call_chat_completion,
 )
-from sentient_orchestrator.llm.usage import UsageStatus, log_usage_attempt
+from sentient_orchestrator.llm.usage import (
+    UsageStatus,
+    log_usage_attempt,
+    update_investigation_totals,
+)
 
 log = get_logger(__name__)
 
-ACTIVE_ROLES = frozenset(
-    {"triage", "investigation", "review", "summarize", "entity_extraction"}
-)
+ACTIVE_ROLES = frozenset({"triage", "investigation", "review", "summarize", "entity_extraction"})
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,10 @@ class _TenantConfig:
     api_key: str
     region_constraint: str | None
     langsmith_enabled: bool
+    #: Per-investigation USD cap. NULL = disabled.
+    per_investigation_budget_usd: Decimal | None
+    #: Per-investigation token cap (input+output combined). NULL = disabled.
+    per_investigation_token_cap: int | None
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,16 @@ class LLMRouter:
         if not role_cfg.enabled:
             msg = f"LLM role {role!r} is disabled for tenant {self._tenant_id}"
             raise RuntimeError(msg)
+
+        # Wk-7: per-investigation cost + token cap gate. Single SELECT against
+        # the running totals on `investigations` (maintained by the post-attempt
+        # accumulator UPDATE below). NULL on either cap = disabled. Bounded
+        # single-call overshoot is acceptable; see BudgetExceeded docstring.
+        if investigation_id is not None and (
+            self._tenant_cfg.per_investigation_budget_usd is not None
+            or self._tenant_cfg.per_investigation_token_cap is not None
+        ):
+            self._check_budget(role=role, investigation_id=investigation_id)
 
         models = [role_cfg.primary_model, *role_cfg.fallback_chain]
         async with httpx.AsyncClient() as client:
@@ -283,6 +303,21 @@ class LLMRouter:
             openrouter_generation_id=response.generation_id,
             latency_ms=response.latency_ms,
         )
+        if investigation_id is not None:
+            # Mirror the per-attempt counters onto the investigations row so
+            # the budget gate can read O(1) instead of SUM-ing usage. Failed
+            # attempts also accumulate via `_log_failure` — see that method.
+            # Known gap: `_validate_with_retry` makes a second HTTP call
+            # within the same attempt that does NOT log a usage row, so its
+            # tokens + cost are not captured here either. Pre-existing wk-6
+            # issue; see tasks/lessons.md.
+            update_investigation_totals(
+                self._conn,
+                investigation_id=investigation_id,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cost_usd=response.cost_usd,
+            )
 
         return LLMResult(
             content=response.content,
@@ -359,6 +394,46 @@ class LLMRouter:
         except ValidationError:
             return None
 
+    def _check_budget(self, *, role: str, investigation_id: UUID) -> None:
+        """Pre-call cap gate. Raise `BudgetExceeded` if any cap is exceeded."""
+        row = self._conn.execute(
+            text("""
+                SELECT total_input_tokens, total_output_tokens, total_cost_usd
+                  FROM investigations
+                 WHERE id = :id
+                """),
+            {"id": str(investigation_id)},
+        ).first()
+        if row is None:
+            return
+        total_in, total_out, total_cost = row
+        total_tokens = int((total_in or 0) + (total_out or 0))
+
+        cap_usd = self._tenant_cfg.per_investigation_budget_usd
+        token_cap = self._tenant_cfg.per_investigation_token_cap
+
+        usd_exceeded = (
+            cap_usd is not None and total_cost is not None and Decimal(total_cost) >= cap_usd
+        )
+        token_exceeded = token_cap is not None and total_tokens >= token_cap
+        if usd_exceeded or token_exceeded:
+            log.warning(
+                "per-investigation budget exceeded",
+                role=role,
+                investigation_id=str(investigation_id),
+                total_cost_usd=str(total_cost),
+                cap_usd=str(cap_usd) if cap_usd is not None else None,
+                total_tokens=total_tokens,
+                token_cap=token_cap,
+            )
+            raise BudgetExceeded(
+                role=role,
+                total_cost_usd=total_cost,
+                cap_usd=cap_usd,
+                total_tokens=total_tokens,
+                token_cap=token_cap,
+            )
+
     def _log_failure(
         self,
         *,
@@ -385,48 +460,65 @@ class LLMRouter:
             openrouter_generation_id=response.generation_id if response else None,
             latency_ms=response.latency_ms if response else None,
         )
+        if investigation_id is not None and response is not None:
+            # Wk-7 fix: failed attempts that DID reach OpenRouter and got a
+            # token-counted response (HTTP error after generation, schema
+            # validation_fail) consumed real tokens. Accumulate them so the
+            # cap gate sees true spend. Pure transport failures (timeout,
+            # network error) have `response is None` — nothing to add.
+            update_investigation_totals(
+                self._conn,
+                investigation_id=investigation_id,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cost_usd=response.cost_usd,
+            )
 
     # ----------------------------------------------------------------- loaders
 
     @staticmethod
     def _load_tenant_config(conn: Connection, tenant_id: UUID) -> _TenantConfig:
         row = conn.execute(
-            text(
-                """
+            text("""
                 SELECT byo_openrouter_key_encrypted,
                        llm_region_constraint,
-                       COALESCE(langsmith_enabled, TRUE) AS langsmith_enabled
+                       COALESCE(langsmith_enabled, TRUE) AS langsmith_enabled,
+                       per_investigation_budget_usd,
+                       per_investigation_token_cap
                 FROM tenants
                 WHERE id = :tid
-                """
-            ),
+                """),
             {"tid": str(tenant_id)},
         ).first()
         if row is None:
             msg = f"tenant {tenant_id} not found"
             raise RuntimeError(msg)
 
-        byo_key_encrypted, region_constraint, langsmith_enabled = row
+        (
+            byo_key_encrypted,
+            region_constraint,
+            langsmith_enabled,
+            budget_usd,
+            token_cap,
+        ) = row
         api_key = _resolve_api_key(byo_key_encrypted)
         return _TenantConfig(
             api_key=api_key,
             region_constraint=region_constraint,
             langsmith_enabled=bool(langsmith_enabled),
+            per_investigation_budget_usd=(Decimal(budget_usd) if budget_usd is not None else None),
+            per_investigation_token_cap=(int(token_cap) if token_cap is not None else None),
         )
 
     @staticmethod
-    def _load_role_config(
-        conn: Connection, tenant_id: UUID, role: str
-    ) -> _RoleConfig:
+    def _load_role_config(conn: Connection, tenant_id: UUID, role: str) -> _RoleConfig:
         row = conn.execute(
-            text(
-                """
+            text("""
                 SELECT primary_model, fallback_chain,
                        max_tokens, temperature, timeout_seconds, enabled
                 FROM llm_role_config
                 WHERE tenant_id = :tid AND role = :role
-                """
-            ),
+                """),
             {"tid": str(tenant_id), "role": role},
         ).first()
         if row is None:

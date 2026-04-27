@@ -8,16 +8,14 @@ from pathlib import Path
 from sentient_ocsf.splunk_mapper import map_notable_to_ocsf
 from sentient_orchestrator.investigation.prompt import (
     build_initial_user_message,
+    build_review_system_prompt,
+    build_review_user_message,
     build_system_prompt,
 )
+from sentient_orchestrator.investigation.sanitizer import MAX_FIELD_CHARS
 
 FIXTURES_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "libs"
-    / "ocsf"
-    / "tests"
-    / "fixtures"
-    / "splunk_notables"
+    Path(__file__).resolve().parents[3] / "libs" / "ocsf" / "tests" / "fixtures" / "splunk_notables"
 )
 
 
@@ -183,3 +181,122 @@ def test_user_message_includes_ending_directive() -> None:
         mitre_descs={},
     )
     assert "Begin the investigation" in msg
+
+
+# ---------------------------------------------------------------- review prompt
+# Wk-7 round-2 R-2 — sanitization coverage for build_review_user_message.
+
+
+def _benign_finding() -> object:
+    return _load_finding("auth_success_windows.json")
+
+
+def test_review_system_prompt_static() -> None:
+    """build_review_system_prompt is intentionally static — same string twice."""
+    a = build_review_system_prompt()
+    b = build_review_system_prompt()
+    assert a == b
+    assert "annotation only" in a
+    assert "ReviewOutput" in a
+
+
+def test_review_user_message_renders_basic_draft() -> None:
+    finding = _benign_finding()
+    draft = {
+        "verdict": "true_positive",
+        "confidence": 85,
+        "severity": "high",
+        "mitre_techniques": ["T1059.001", "T1071"],
+        "summary": "PowerShell C2.",
+        "evidence": ["spl: index=main"],
+        "reasoning": "encoded -enc + outbound HTTPS.",
+    }
+    msg = build_review_user_message(finding=finding, draft_verdict=draft)
+    assert "true_positive" in msg
+    assert "T1059.001" in msg
+    assert "PowerShell C2." in msg
+    assert "spl: index=main" in msg
+    assert "encoded -enc" in msg
+
+
+def test_review_user_message_strips_control_chars_from_draft() -> None:
+    """Every draft_verdict field must flow through sanitize_untrusted —
+    null bytes / NUL / DEL / control chars are stripped before joining the
+    prompt. Defense-in-depth against agent-echoed Splunk content."""
+    finding = _benign_finding()
+    draft = {
+        "verdict": "true_positive\x00\x07",
+        "confidence": 75,
+        "severity": "high\x1bEVIL",
+        "mitre_techniques": ["T1059.001\x00ATTACK", "T1071\x07"],
+        "summary": "First line.\x00Hidden second line.",
+        "evidence": [
+            "spl: \x00index=main",
+            "second\x07 evidence\x1b item",
+        ],
+        "reasoning": "chain\x00of\x07reasoning\x1bend",
+    }
+    msg = build_review_user_message(finding=finding, draft_verdict=draft)
+    # No control chars survive in the rendered output.
+    assert "\x00" not in msg
+    assert "\x07" not in msg
+    assert "\x1b" not in msg
+    # The benign tokens around the stripped chars must still be visible.
+    assert "true_positive" in msg
+    assert "T1059.001" in msg
+    assert "ATTACK" in msg  # the trailing token after the null byte
+
+
+def test_review_user_message_caps_oversized_fields() -> None:
+    """Sanitizer caps each field at MAX_FIELD_CHARS (4000). Oversized
+    summary / reasoning / evidence items are truncated."""
+    finding = _benign_finding()
+    huge = "A" * (MAX_FIELD_CHARS + 500)
+    draft = {
+        "verdict": "true_positive",
+        "confidence": 80,
+        "severity": "high",
+        "mitre_techniques": ["T1059.001"],
+        "summary": huge,
+        "evidence": [huge],
+        "reasoning": huge,
+    }
+    msg = build_review_user_message(finding=finding, draft_verdict=draft)
+    # No single block is larger than the per-field cap.
+    # `huge` minus the cap should NOT appear contiguously in output.
+    assert ("A" * (MAX_FIELD_CHARS + 1)) not in msg
+
+
+def test_review_user_message_handles_malformed_draft() -> None:
+    """Missing fields fall back to (unknown) / (none) / (empty) without
+    crashing. Exercises the defensive `or '(unknown)'` / `or 0` paths."""
+    finding = _benign_finding()
+    draft: dict[str, object] = {"verdict": "true_positive"}
+    msg = build_review_user_message(finding=finding, draft_verdict=draft)
+    # Missing severity falls back to placeholder.
+    assert "(unknown)" in msg
+    # Missing mitre_techniques renders as (none).
+    assert "(none)" in msg
+    # Missing reasoning renders as (empty).
+    assert "(empty)" in msg
+    # confidence is `or 0` int-casted.
+    assert "Confidence: 0" in msg
+
+
+def test_review_user_message_handles_non_string_evidence_items() -> None:
+    """Evidence items are coerced to str(item) before sanitization — non-string
+    leaks (numbers, dicts) shouldn't crash."""
+    finding = _benign_finding()
+    draft = {
+        "verdict": "true_positive",
+        "confidence": 80,
+        "severity": "high",
+        "mitre_techniques": ["T1059.001"],
+        "summary": "ok",
+        "evidence": [42, {"injected": "object\x00"}, "string ok"],
+        "reasoning": "r",
+    }
+    msg = build_review_user_message(finding=finding, draft_verdict=draft)
+    assert "42" in msg
+    assert "string ok" in msg
+    assert "\x00" not in msg

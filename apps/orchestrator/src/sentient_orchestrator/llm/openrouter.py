@@ -88,9 +88,10 @@ async def call_chat_completion(
     `response_format=json_schema` — most providers reject the combination.
     The router enforces this; we don't double-check here.
     """
+    wire_messages = _apply_cache_markers(messages)
     body: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": wire_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "usage": {"include": True},
@@ -131,6 +132,55 @@ async def call_chat_completion(
     payload: dict[str, Any] = response.json()
 
     return _parse_response(payload, latency_ms=latency_ms)
+
+
+def _apply_cache_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rewrite messages flagged `cacheable=True` into Anthropic cache-block form.
+
+    Wk-7. Caller (the investigation prompt builders) flags long, stable blocks
+    with ``"cacheable": True``. This pre-wire transform converts a string
+    ``content`` into a 1-element content-block array carrying
+    ``cache_control: {"type": "ephemeral"}`` — the wire shape Anthropic
+    honors for prompt caching when proxied through OpenRouter.
+
+    The flag is stripped before the request leaves the process. Non-Anthropic
+    backends (Gemini, OpenAI) ignore unknown ``cache_control`` metadata
+    gracefully — extra fields on text blocks pass through. Gemini's implicit
+    caching path doesn't need markers; this is a no-op for it.
+
+    Anthropic enforces a max of 4 cache breakpoints per request — that's a
+    caller-side budget (system + finding + MITRE = 3 today; tool-results
+    block is the wk-8 candidate for the 4th). Not enforced here.
+    """
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict) or not msg.get("cacheable"):
+            # Not flagged — pass through verbatim. Defensive copy to avoid
+            # mutating the caller's history (LangGraph state may be shared).
+            out.append({k: v for k, v in msg.items() if k != "cacheable"})
+            continue
+        rewritten = {k: v for k, v in msg.items() if k != "cacheable"}
+        content = rewritten.get("content")
+        if isinstance(content, str) and content:
+            rewritten["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        elif isinstance(content, list) and content:
+            # Already block-array — add cache_control to the LAST text block
+            # (the breakpoint sits at the end of the cached prefix).
+            new_blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+            for block in reversed(new_blocks):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    block["cache_control"] = {"type": "ephemeral"}
+                    break
+            rewritten["content"] = new_blocks
+        # else: empty / unsupported content — leave alone, just strip the flag.
+        out.append(rewritten)
+    return out
 
 
 def _parse_response(payload: dict[str, Any], *, latency_ms: int) -> OpenRouterResponse:

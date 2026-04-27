@@ -196,3 +196,42 @@ All 3 gates PASSED end-to-end. Several environment-specific gotchas surfaced; al
 ### Pydantic v2 reserves leading-underscore field names — alias Splunk's `_time` / `_raw`
 - Splunk notables ship `_time` (epoch) and `_raw` (full event text). Pydantic v2 raises if you declare model fields starting with underscore. Solution: declare as `notable_time: float | str = Field(..., alias="_time")` + `model_config = ConfigDict(populate_by_name=True, extra="allow")`.
 - **Rule:** for any Pydantic v2 model that mirrors an external JSON shape, scan for leading-underscore field names up front and alias them. `populate_by_name=True` is needed if any internal code constructs by attribute name rather than by alias.
+
+---
+
+## Wk 7 (Tier-2 completeness + review + caching)
+
+### `_validate_with_retry` schema-retry HTTP call is uncosted — gap predates wk-7
+- LLMRouter's schema-retry path inside `_validate_with_retry` calls `_traced_call` a second time WITHOUT a corresponding `log_usage_attempt` row. That second call's tokens + cost are absent from both the `usage` ledger AND the wk-7 per-investigation accumulator. Wk-7 inherits the gap; the cap can underestimate spend by one call worth of tokens.
+- Why not fix in wk-7: the retry response object is consumed for parsed output; bolting `log_usage_attempt` onto it requires plumbing `attempt_num` semantics (does the retry get its own `attempt_num`? sub-attempt? same?) and changes the per-attempt ledger contract that ADR-0015 documents. Better to fix in wk-12 hardening with an ADR amendment than smuggle in mid-feature work.
+- **Rule:** when a feature build (cap accumulator) discovers a pre-existing audit/ledger gap, document the gap with code comment + lessons entry + carry-over in `tasks/todo.md`. Don't expand scope mid-week.
+
+### Reuse existing columns before adding new ones
+- Wk-7 plan initial draft proposed a new `evidence_manifest_s3_key` column on `investigations`. Pressure-test caught: `evidence_s3_key` and `review_notes` were already on the initial schema (lines 116, 118 of `81e2d43b3ec0`). Migration shrank to: 3 totals + `review_status` + `review_metadata` + `tenants.per_investigation_token_cap`.
+- **Rule:** before drafting a migration, grep the initial schema for every column name in scope. The wk-1/2 migrations land speculatively; columns sit unused until the consumer arrives, and a fresh week tends to forget they exist.
+
+### Anthropic `cache_control` is content-block-level, not message-level
+- First plan draft routed cache markers as a top-level kwarg / message-metadata. Anthropic-via-OpenRouter actually requires `cache_control` to attach to a content **block** inside the message (`content: [{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]`). String content must be rewritten to a 1-block array before the wire send.
+- Implementation: a `cacheable: bool` flag on the message dict (content-stable across LangGraph state appends) consumed by `call_chat_completion._apply_cache_markers`. Index-based `cache_breakpoints: list[int]` is wrong because the messages list grows over the agent loop.
+- Anthropic enforces max 4 cache breakpoints per request (system + finding + MITRE = 3 today).
+- **Rule:** for any provider-specific wire feature (cache_control, structured output, tool_choice variants), confirm WHERE in the request shape it lives BEFORE designing the API surface. "It's a message metadata field" is wrong for Anthropic; it's a content-block field.
+
+### Review-role failures must be best-effort, not propagating
+- `review_node` failure inside the LangGraph (FallbackChainExhausted, BudgetExceeded, unhandled) does NOT fail the investigation. The verdict is already drafted; review is annotation. Skip with `status='skipped'` + `review_skipped` audit + log.
+- Why this matters: review hits the same per-investigation cap as `plan/agent/correlate/draft_verdict`. A near-cap investigation that scrapes through draft_verdict but blows the cap on review would wrongly mark the whole investigation `inconclusive` if review propagated — destroying the verdict that already cost real tokens.
+- **Rule:** any "after the verdict" annotation step (review, manifest upload, evidence-row writeback) must be wrapped so its failure doesn't roll back the verdict + audit chain that already committed.
+
+### Sensitive-field leaks travel through more than one channel — close ALL of them
+- Wk-7 round-1 fix #5 stripped cap config from `BudgetExceeded.__str__`. Round-2 review caught that `runner.py`'s exception handler manually rebuilt the same cap leak in `error_message` and passed it to `_finalize_inconclusive` → `emit_investigation_failed` → `audit_log.details.error_message`. The fix moved the leak from `str(exc)` to a structured field; didn't close it.
+- The structured `emit_budget_exceeded` audit row was already the right channel for cap details. The runner's manual reconstruction in `error_message` was redundant + leaky.
+- **Rule:** when fixing a "this field leaks" bug, grep every callsite that consumes the structured exception attributes (`exc.cap_usd`, `exc.total_cost_usd`, etc.) — not just `str(exc)`. The fix is incomplete until every interpolation of those attributes into a customer-eventually-visible surface is closed.
+
+### Defend cost-accumulator UPDATEs against Byzantine inputs at SQL time
+- Wk-7 round-2 fix R-3: `update_investigation_totals` initially used `COALESCE(:val, 0)` for NULL safety. A response with negative `prompt_tokens` (compromised proxy / malformed JSON / future bug) would have DECREMENTED running totals and defeated the per-investigation cap gate. The cap silently disables in that scenario.
+- Fix: wrap each accumulator value in `COALESCE(GREATEST(:val, 0), 0)`. Clamps negatives to zero AT WRITE TIME — Python-side validation can be bypassed by future callers; SQL-side clamp is the load-bearing invariant.
+- **Rule:** any monotonic counter UPDATE (cost, tokens, attempt count) where the increment comes from external/network input must clamp at the SQL layer. Trust the database, not the caller.
+
+### Speed-running tests creates dead `or True` no-op assertions
+- Wk-7 round-2 fix R-4: `test_investigation_manifest.py` had `assert ("uploaded", upload_kwargs) or True  # exists check below` — the `or True` makes it always pass; the comment refers to a different downstream assertion. The `upload_kwargs` variable was captured but never asserted on.
+- Pattern: rushing tests sometimes leaves "TODO-shaped" placeholders that look like assertions but aren't.
+- **Rule:** review every `assert` line in new tests for tautology. `assert X or True`, `assert X or 1`, `assert isinstance(X, object)`, `assert X is not None or True` — all silently always-pass. If the assertion is hard to write, leave a `# TODO` and skip it explicitly with `pytest.xfail` so it surfaces in CI.

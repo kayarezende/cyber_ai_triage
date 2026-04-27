@@ -62,6 +62,11 @@ class InvestigationState(TypedDict, total=False):
     # Final verdict surface populated by `draft_verdict_node`.
     draft_verdict: dict[str, Any] | None
 
+    # Wk-7. Review-role output populated by `review_node` (or skipped form
+    # when the review LLM call fails — review is best-effort, never blocks
+    # the verdict). Round-tripped through the LangGraph checkpointer.
+    review_output: dict[str, Any] | None
+
 
 class InvestigationOutput(BaseModel):
     """Tier-2 verdict surface emitted by the draft_verdict node."""
@@ -114,9 +119,60 @@ class InvestigationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+ReviewStatus = Literal["approved", "flagged", "skipped"]
+HallucinationRisk = Literal["low", "medium", "high"]
+ConfidenceAssessment = Literal[
+    "overconfident", "well_calibrated", "underconfident"
+]
+
+
+class ReviewOutput(BaseModel):
+    """Wk-7. Critic surface emitted by `review_node`.
+
+    Annotation-only — does NOT override `InvestigationOutput.confidence` or
+    `verdict`. The flagged status surfaces in HITL UI (wk-8) so the analyst
+    knows where to focus when approving.
+    """
+
+    status: Literal["approved", "flagged"] = Field(
+        ...,
+        description=(
+            "`approved` — review pass found no concerns. `flagged` — at least "
+            "one hallucination indicator or low-confidence reasoning."
+        ),
+    )
+    hallucination_risk: HallucinationRisk = Field(
+        ...,
+        description=(
+            "Likelihood that the draft cites unverified or fabricated evidence."
+        ),
+    )
+    confidence_assessment: ConfidenceAssessment = Field(
+        ...,
+        description=(
+            "Whether the draft's confidence is calibrated relative to the "
+            "evidence cited."
+        ),
+    )
+    notes: str = Field(
+        ..., min_length=1, description="1-3 sentence critic notes."
+    )
+    flagged_claims: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Specific claims (quoted or paraphrased from the draft's "
+            "`evidence`/`reasoning`) that the reviewer judged weak."
+        ),
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 __all__ = [
     "MAX_TOOL_CALLS",
     "InvestigationOutput",
     "InvestigationState",
+    "ReviewOutput",
+    "ReviewStatus",
     "Verdict",
 ]

@@ -10,7 +10,7 @@ from sentient_orchestrator.investigation.graph import build_investigation_graph
 
 def test_builder_registers_all_nodes() -> None:
     builder = build_investigation_graph()
-    expected = {"plan", "agent", "tools", "correlate", "draft_verdict"}
+    expected = {"plan", "agent", "tools", "correlate", "draft_verdict", "review"}
     assert expected.issubset(builder.nodes.keys())
 
 
@@ -27,7 +27,10 @@ def test_static_edges_present() -> None:
     assert ("plan", "agent") in edges
     assert ("tools", "agent") in edges
     assert ("correlate", "draft_verdict") in edges
-    assert ("draft_verdict", END) in edges
+    # Wk-7: draft_verdict no longer terminal — review sits between it and END.
+    assert ("draft_verdict", "review") in edges
+    assert ("review", END) in edges
+    assert ("draft_verdict", END) not in edges
 
 
 def test_agent_has_conditional_routing() -> None:
