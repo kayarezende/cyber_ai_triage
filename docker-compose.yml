@@ -120,6 +120,8 @@ services:
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-sentient-layer-dev}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      # FastMCP mounts the streamable_http transport at /mcp.
+      MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
     depends_on:
       postgres:
         condition: service_healthy
@@ -143,10 +145,14 @@ services:
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-sentient-layer-dev}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      # Worker drives Tier-2 LangGraph; same MCP endpoint as the orchestrator.
+      MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mcp-splunk:
         condition: service_healthy
     restart: unless-stopped
 
