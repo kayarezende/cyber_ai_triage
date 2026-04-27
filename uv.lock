@@ -2038,6 +2038,7 @@ name = "sentient-orchestrator"
 version = "0.0.1"
 source = { editable = "apps/orchestrator" }
 dependencies = [
+    { name = "httpx" },
     { name = "langchain-anthropic" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
@@ -2046,6 +2047,7 @@ dependencies = [
     { name = "langsmith" },
     { name = "mcp" },
     { name = "sentient-common", extra = ["db"] },
+    { name = "sentient-ocsf" },
 ]
 
 [package.dev-dependencies]
@@ -2057,6 +2059,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
     { name = "langchain-anthropic", specifier = ">=0.3" },
     { name = "langchain-mcp-adapters", specifier = ">=0.2,<0.3" },
     { name = "langchain-openai", specifier = ">=0.3" },
@@ -2065,6 +2068,7 @@ requires-dist = [
     { name = "langsmith", specifier = ">=0.2" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "sentient-common", extras = ["db"], editable = "libs/common" },
+    { name = "sentient-ocsf", editable = "libs/ocsf" },
 ]
 
 [package.metadata.requires-dev]

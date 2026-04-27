@@ -2,12 +2,15 @@
 
 Wk 1: BLPOP loop + sentinel heartbeat + structured logging.
 Wk 4: parse the popped payload as `IngestJob` and run the wk-4 stub
-investigation in-process. Wk-6 swaps the body of `run_stub_investigation`
-for the real LangGraph runner; this loop stays.
+investigation in-process.
+Wk 5: stub replaced by `run_investigation` (Tier-1 triage via LLMRouter).
+Wk-6 will swap the body again for the LangGraph Tier-2 runner; this loop
+stays.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 from pathlib import Path
@@ -19,7 +22,8 @@ from pydantic import ValidationError
 
 from sentient_common.jobs import QUEUE_INVESTIGATIONS, IngestJob
 from sentient_common.logging import configure_logging, get_logger
-from sentient_orchestrator.stub_investigation import run_stub_investigation
+from sentient_orchestrator.runner import run_investigation
+from sentient_orchestrator.tracing import init_tracing
 
 _SENTINEL = Path("/tmp/ready")
 _BLPOP_TIMEOUT_SECONDS = 30
@@ -50,15 +54,16 @@ def _process_payload(payload: bytes) -> None:
         tenant_id=str(job.tenant_id),
     )
     try:
-        investigation_id = run_stub_investigation(job)
+        investigation_id = asyncio.run(run_investigation(job))
     except Exception:
         # Wk-4: at-most-once. Wk-6 adds a reliable queue + DLQ.
-        job_log.exception("stub investigation failed")
+        job_log.exception("investigation failed")
         return
-    job_log.info("stub investigation done", investigation_id=str(investigation_id))
+    job_log.info("investigation done", investigation_id=str(investigation_id))
 
 
 def main() -> int:
+    init_tracing()
     url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     client = redis.Redis.from_url(url)
     log.info("worker ready", queue=QUEUE_INVESTIGATIONS)

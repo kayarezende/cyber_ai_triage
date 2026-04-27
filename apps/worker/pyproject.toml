@@ -6,9 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
     "sentient-common[db]",
-    # In-process dispatch — worker imports run_stub_investigation directly.
-    # Wk-6 keeps the import path; the body of the function is replaced by the
-    # real LangGraph runner.
+    # In-process dispatch — worker imports run_investigation directly.
+    # Wk-6 swaps the body for the LangGraph Tier-2 runner; import path stable.
     "sentient-orchestrator",
 ]
 

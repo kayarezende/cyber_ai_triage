@@ -53,7 +53,11 @@ uv run python db/seeds/setup_checkpointer.py
 # 7. Seed MITRE ATT&CK techniques
 uv run python db/seeds/seed_mitre.py
 
-# 8. Verify
+# 8. Seed dev tenant + per-role LLM config
+uv run python db/seeds/seed_tenants.py
+uv run python db/seeds/seed_llm_role_config.py
+
+# 9. Verify
 curl http://api.triage.local/health   # → {"status":"ok","service":"api"}
 curl -I http://app.triage.local/      # → 200 OK
 docker compose ps                     # → every service healthy

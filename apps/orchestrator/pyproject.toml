@@ -11,8 +11,14 @@ dependencies = [
     "langchain-mcp-adapters>=0.2,<0.3",
     "langsmith>=0.2",
     "mcp>=1.27,<2",
+    "httpx>=0.28",
     "sentient-common[db]",
+    "sentient-ocsf",
 ]
+
+[tool.uv.sources]
+sentient-common = { workspace = true }
+sentient-ocsf = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -27,6 +33,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sentient_orchestrator"]
-
-[tool.uv.sources]
-sentient-common = { workspace = true }
