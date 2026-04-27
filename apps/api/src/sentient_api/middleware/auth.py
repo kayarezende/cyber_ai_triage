@@ -17,9 +17,17 @@ from starlette.types import ASGIApp
 
 from sentient_api.settings import DEV_TENANT_ID, get_settings
 
-# Paths that skip auth entirely (probes, docs, OpenAPI).
+# Paths that skip auth entirely (probes, docs, OpenAPI, machine-to-machine
+# webhooks). The ingest webhook authenticates via a shared secret in the body
+# (ADR-0021), not via Entra/dev-bypass user auth.
 _ALLOWLIST: frozenset[str] = frozenset(
-    {"/health", "/docs", "/redoc", "/openapi.json"}
+    {
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/api/incidents/ingest",
+    }
 )
 
 

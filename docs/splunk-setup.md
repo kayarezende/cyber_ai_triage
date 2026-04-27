@@ -112,19 +112,59 @@ curl -k "https://${SPLUNK_HOST}:${SPLUNK_PORT}/services/server/info?output_mode=
 
 ## 5. Saved search + alert-action webhook
 
-Wired fully in wk 4 (ingest path). Stub now so everything is in one place.
+Wired in wk 4 (ingest path).
 
-1. Create the saved search that drives triage, e.g.:
-   ```
-   index=notable | table *
-   ```
-   Scheduled, throttled to dedupe by `event_id`.
-2. **Alert action → Webhook** pointing at:
-   ```
-   http://api.triage.local/api/incidents/ingest
-   ```
-   (HTTPS wk 12; see TLS note at the bottom.)
-3. Add header `X-Webhook-Secret: ${INGEST_WEBHOOK_SECRET}` (ADR 0014).
+### 5.1 Saved search
+
+Create the saved search that drives triage, e.g.:
+```
+index=notable | table *
+```
+Scheduled, throttled to dedupe by `event_id`.
+
+### 5.2 Webhook URL
+
+**Alert action → Webhook** pointing at:
+```
+http://api.triage.local/api/incidents/ingest
+```
+HTTPS wk 12; see TLS note at the bottom.
+
+### 5.3 Webhook secret carrier
+
+Stock Splunk Enterprise's webhook alert action does **not** support custom
+headers (verified Splunk 10.x alerting manual). ADR-0021 supersedes the
+ADR-0014 §header carrier — the secret travels in the request body.
+
+In the saved-search alert action, add a webhook **parameter**:
+
+| Field | Value |
+|-------|-------|
+| Name  | `secret` |
+| Value | `${INGEST_WEBHOOK_SECRET}` (paste the value from `.env`) |
+
+Splunk's webhook action then POSTs a JSON body of the form:
+
+```json
+{
+  "sid": "scheduler__...",
+  "search_name": "<your saved search name>",
+  "result": { "...the search row..." },
+  "results_link": "...",
+  "secret": "<INGEST_WEBHOOK_SECRET>"
+}
+```
+
+The API does `hmac.compare_digest(body.secret, INGEST_WEBHOOK_SECRET)` →
+401 on mismatch.
+
+> ⚠️ **Sensitive saved-search export.** The webhook parameter value is
+> stored in the saved-search definition. Anyone with `admin_all_objects`
+> (or who can read an exported `savedsearches.conf`) sees the secret in
+> cleartext. Treat saved-search exports as sensitive — redact `secret`
+> before sharing.
+
+### 5.4 Smoke
 
 Drop a test notable after wk 4 lands → an `incidents` row should appear in
 Postgres within seconds.

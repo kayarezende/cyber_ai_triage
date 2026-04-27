@@ -11,7 +11,7 @@ dependencies = [
     "langchain-mcp-adapters>=0.2,<0.3",
     "langsmith>=0.2",
     "mcp>=1.27,<2",
-    "sentient-common",
+    "sentient-common[db]",
 ]
 
 [dependency-groups]

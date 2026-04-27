@@ -489,10 +489,13 @@ _Wk-2 founder live-gates — all PASSED 2026-04-27 (see `tasks/lessons.md` for f
 - [x] Mapper extension surface: added `Actor`, `User`, `NetworkEndpoint` sub-models + 3 optional fields on `DetectionFinding` (`actor`, `src_endpoint`, `dst_endpoint`). Deferred `Device`, `File`, `Process`, `Evidences[]`, `Enrichments[]` to wk-6 when the investigation agent's enrichment pipeline forces them.
 
 **Wk 4 — Ingest path end-to-end**
-- [ ] Splunk saved search + alert action → webhook to `/api/incidents/ingest` (with `X-Webhook-Secret` check).
-- [ ] Job enqueue on Redis; worker picks up.
-- [ ] Worker invokes orchestrator (stub verdict for now).
-- [ ] Smoke: drop notable → investigation row appears with stub verdict.
+
+_File-side complete 2026-04-27; founder live-gate (Splunk drop on real box) pending._
+
+- [x] Splunk saved search + alert action → webhook to `/api/incidents/ingest` (with body-field `secret` check). **ADR-0014 §header carrier superseded by ADR-0021** — stock Splunk webhook alert action does not support custom headers; secret travels in body. `splunk-setup.md` §5.3 updated with templated `{secret, result}` payload.
+- [x] Job enqueue on Redis; worker picks up. `IngestJob` schema + `enqueue_investigation()` live in `libs/common/src/sentient_common/jobs.py` so api producer + worker consumer share the contract without dragging each other's deps.
+- [x] Worker invokes orchestrator (stub verdict for now). In-process import: `sentient_orchestrator.stub_investigation.run_stub_investigation(job)`. Wk-6 swaps the body for the real LangGraph runner — import path is stable.
+- [x] Smoke: drop notable → investigation row appears with stub verdict. `evals/harness/test_wk4_smoke.py` (`@pytest.mark.integration`) drives the full webhook → MinIO → Postgres → Redis → worker → stub investigation loop. Founder runs against compose stack on box.
 
 **Wk 5 — Per-role LLM config + Triage**
 - [ ] Seed `llm_role_config` with 5 rows per tenant (3 enabled, 2 disabled).

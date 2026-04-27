@@ -70,10 +70,11 @@ What costs do we accept? What do we gain? What becomes harder?
 | 0011 | [Dev-bypass auth for MVP, Entra SSO in wk 11](0011-dev-bypass-auth-mvp-entra-wk11.md) | Accepted |
 | 0012 | [Fernet-based secret encryption](0012-fernet-secret-encryption.md) | Accepted |
 | 0013 | [LangSmith + structlog for observability](0013-langsmith-observability.md) | Accepted |
-| 0014 | [Shared-secret webhook auth for MVP](0014-shared-secret-webhook-auth.md) | Accepted |
+| 0014 | [Shared-secret webhook auth for MVP](0014-shared-secret-webhook-auth.md) | Accepted (carrier §refined by 0021) |
 | 0015 | [App-side LLM fallback loop](0015-app-side-llm-fallback.md) | Accepted (supersedes 0004 §4) |
 | 0016 | [Sovereignty hybrid surface — drop MVP claim, prepare DB](0016-sovereignty-mode-hybrid.md) | Accepted |
 | 0017 | [Hash-chained audit log + DB role split](0017-audit-hash-chain.md) | Accepted |
 | 0018 | [Splunk writeback mode (`dual` vs `hec_only`)](0018-splunk-writeback-mode.md) | Accepted (refines 0008) |
 | 0019 | [MCP transport: `streamable_http`](0019-mcp-transport-streamable-http.md) | Accepted |
 | 0020 | [OCSF 1.3.0 validator: hand-rolled Pydantic v2](0020-ocsf-validator-handrolled-pydantic.md) | Accepted (refines 0007) |
+| 0021 | [Webhook secret carrier — body field](0021-webhook-secret-body-field.md) | Accepted (refines 0014) |

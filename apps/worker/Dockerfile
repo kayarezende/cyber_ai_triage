@@ -14,6 +14,7 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY libs/common ./libs/common
+COPY apps/orchestrator ./apps/orchestrator
 COPY apps/worker ./apps/worker
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --package sentient-worker
@@ -23,6 +24,7 @@ FROM python:${PYTHON_VERSION}-slim AS runtime
 
 WORKDIR /app
 COPY --from=builder /app /app
+COPY apps/orchestrator ./apps/orchestrator
 COPY apps/worker ./apps/worker
 
 ENV PATH="/app/.venv/bin:${PATH}" \

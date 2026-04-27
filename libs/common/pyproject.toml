@@ -1,12 +1,26 @@
 [project]
 name = "sentient-common"
 version = "0.0.1"
-description = "Shared utilities (structlog JSON logging, Fernet crypto) for Sentient Layer services."
+description = "Shared utilities (structlog JSON logging, Fernet crypto, DB session, MinIO storage, audit log helper, Redis job schemas) for Sentient Layer services."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "structlog>=24.4",
     "cryptography>=43",
+    "pydantic>=2.9",
+    "redis>=5.2",
+]
+
+# Optional extras let the lightweight consumers (mcp-splunk) avoid pulling in
+# DB / storage stacks they don't use. Heavyweight services (api, worker,
+# orchestrator) declare the extras they need: `sentient-common[db,storage]`.
+[project.optional-dependencies]
+db = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+]
+storage = [
+    "minio>=7.2",
 ]
 
 [build-system]

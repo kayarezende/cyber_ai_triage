@@ -8,7 +8,14 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic-settings>=2.6",
     "httpx>=0.28",
-    "sentient-common",
+    "sentient-common[db,storage]",
+    "sentient-ocsf",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-mock>=3.14",
 ]
 
 [build-system]
@@ -20,3 +27,4 @@ packages = ["src/sentient_api"]
 
 [tool.uv.sources]
 sentient-common = { workspace = true }
+sentient-ocsf = { workspace = true }

@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     dev_user_email: str = "dev@sentientlayer.ai"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/sentient"
 
+    # Wk-4 ingest webhook + queue + evidence store.
+    ingest_webhook_secret: str = ""
+    redis_url: str = "redis://localhost:6379/0"
+    minio_endpoint: str = "http://localhost:9000"
+    minio_root_user: str = "minioadmin"
+    minio_root_password: str = "minioadmin"
+    minio_bucket_evidence: str = "evidence"
+
 
 def get_settings() -> Settings:
     """Construct a fresh Settings each call so tests can monkeypatch env vars."""

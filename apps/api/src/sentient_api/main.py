@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from sentient_api.middleware.auth import DevBypassAuthMiddleware
-from sentient_api.routers import health
+from sentient_api.routers import health, incidents
 from sentient_common.logging import configure_logging, get_logger
 
 configure_logging(service="api")
@@ -28,3 +28,4 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Sentient Layer API", version="0.0.1", lifespan=_lifespan)
 app.add_middleware(DevBypassAuthMiddleware)
 app.include_router(health.router)
+app.include_router(incidents.router)

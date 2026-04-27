@@ -1,7 +1,7 @@
 # 0014: Shared-secret webhook auth for MVP
 
 Date: 2026-04-15
-Status: Accepted
+Status: Accepted (carrier §refined by ADR-0021 — stock Splunk webhook alert action does not support custom headers; secret moved to body field. Threat-model decision unchanged.)
 
 ## Context
 

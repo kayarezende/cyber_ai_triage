@@ -1881,8 +1881,15 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pydantic-settings" },
-    { name = "sentient-common" },
+    { name = "sentient-common", extra = ["db", "storage"] },
+    { name = "sentient-ocsf" },
     { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
 ]
 
 [package.metadata]
@@ -1890,8 +1897,15 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "sentient-common", editable = "libs/common" },
+    { name = "sentient-common", extras = ["db", "storage"], editable = "libs/common" },
+    { name = "sentient-ocsf", editable = "libs/ocsf" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-mock", specifier = ">=3.14" },
 ]
 
 [[package]]
@@ -1900,7 +1914,18 @@ version = "0.0.1"
 source = { editable = "libs/common" }
 dependencies = [
     { name = "cryptography" },
+    { name = "pydantic" },
+    { name = "redis" },
     { name = "structlog" },
+]
+
+[package.optional-dependencies]
+db = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy" },
+]
+storage = [
+    { name = "minio" },
 ]
 
 [package.dev-dependencies]
@@ -1911,8 +1936,14 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=43" },
+    { name = "minio", marker = "extra == 'storage'", specifier = ">=7.2" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'db'", specifier = ">=3.2" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "redis", specifier = ">=5.2" },
+    { name = "sqlalchemy", marker = "extra == 'db'", specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.4" },
 ]
+provides-extras = ["db", "storage"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]
@@ -2014,7 +2045,7 @@ dependencies = [
     { name = "langgraph-checkpoint-postgres" },
     { name = "langsmith" },
     { name = "mcp" },
-    { name = "sentient-common" },
+    { name = "sentient-common", extra = ["db"] },
 ]
 
 [package.dev-dependencies]
@@ -2033,7 +2064,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-postgres", specifier = ">=3.0" },
     { name = "langsmith", specifier = ">=0.2" },
     { name = "mcp", specifier = ">=1.27,<2" },
-    { name = "sentient-common", editable = "libs/common" },
+    { name = "sentient-common", extras = ["db"], editable = "libs/common" },
 ]
 
 [package.metadata.requires-dev]
@@ -2049,15 +2080,27 @@ version = "0.0.1"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "httpx" },
-    { name = "redis" },
-    { name = "sentient-common" },
+    { name = "sentient-common", extra = ["db"] },
+    { name = "sentient-orchestrator" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
-    { name = "redis", specifier = ">=5.2" },
-    { name = "sentient-common", editable = "libs/common" },
+    { name = "sentient-common", extras = ["db"], editable = "libs/common" },
+    { name = "sentient-orchestrator", editable = "apps/orchestrator" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-mock", specifier = ">=3.14" },
 ]
 
 [[package]]
