@@ -456,9 +456,9 @@ _Session 2 (2026-04-16 / 17): full stack + libs/common + MITRE seed + splunk-set
 
 _Session-start prereqs (founder-run before Claude touches wk 2 code):_
 
-- [ ] Fill `.env` real values: `SPLUNK_HOST`, `SPLUNK_TOKEN`, `SPLUNK_HEC_HOST`, `SPLUNK_HEC_TOKEN`, `OPENROUTER_API_KEY`, `LANGSMITH_API_KEY` (must start `ls__`), then flip `LANGSMITH_TRACING=true`.
-- [x] BOTS v3 loaded on Splunk box per `docs/splunk-setup.md` §6 (closed wk 1).
-- [ ] Network reachability from docker host: both `${SPLUNK_HOST}:8089` and `${SPLUNK_HEC_HOST}:8088` respond (`docs/splunk-setup.md` §8).
+- [x] Fill `.env` real values: `SPLUNK_HOST`, `SPLUNK_TOKEN`, `SPLUNK_HEC_HOST`, `SPLUNK_HEC_TOKEN`, `OPENROUTER_API_KEY`, `LANGSMITH_API_KEY` (`lsv2_` prefix accepted; `ls__` legacy form too), `LANGSMITH_TRACING=true`. **Also `SPLUNK_VERIFY_TLS=false` (founder's box uses self-signed cert).** Closed 2026-04-27.
+- [~] BOTS v3 — wk-1 review claimed loaded but Gate 2 query against `index=botsv3` returned 0 events; index doesn't exist. `main` has live UniFi logs (12M events) + Windows event logs from current host. **Action before wk 5 eval set:** founder runs `docs/splunk-setup.md` §6 BOTS load + verifies with `search index=botsv3 earliest=2018-08-01T00:00:00 latest=2018-09-30T00:00:00 | head 1`. Wk-3 OCSF mapper does NOT depend on BOTS.
+- [x] Network reachability from docker host verified by Gate 2: 192.168.0.x:8089 connects + auth + oneshot search round-trip. HEC :8088 reachability deferred to wk 8 (`siem_hec_post`); same network/host, low risk.
 
 _Carry-over from wk 1 (non-blocking; resolve opportunistically):_
 
@@ -482,10 +482,11 @@ _Wk-2 founder live-gates — all PASSED 2026-04-27 (see `tasks/lessons.md` for f
 - [x] **Day 5 transport gate (docker)** — `docker compose build mcp-splunk` + `up -d` succeeded; container healthy in 5s; `/health` 200; `splunk_smoke --invoke` runs `siem_query("index=_internal | head 5", "-1h", "now")` end-to-end through the container against the LAN Splunk box. tool_count=2 confirmed, MCP protocol 2025-11-25 negotiated, full request → splunk-sdk → Splunk → response round-trip green.
 
 **Wk 3 — OCSF normalization layer**
-- [ ] Splunk notable → OCSF 1.3.0 Detection Finding mapper.
-- [ ] Validator per wk 0 decision.
-- [ ] Store raw + normalized in `incidents`.
-- [ ] Unit tests covering 10+ Splunk notable variants from BOTS.
+- [ ] Splunk notable → OCSF 1.3.0 Detection Finding mapper. Consumes `libs/ocsf/src/sentient_ocsf/detection_finding.py` (ADR-0020 hand-rolled validator, landed wk 2). Mapper module lives under `libs/ocsf/src/sentient_ocsf/splunk_mapper.py` (sibling of the model).
+- [x] Validator per wk 0 decision — resolved wk 2 (ADR-0020 hand-rolled Pydantic v2; supersedes ADR-0007 §validator).
+- [ ] Store raw + OCSF-normalized payloads in `incidents` table — `raw_payload_s3_key` (MinIO) + `ocsf_normalized` JSONB. Migration likely needs a NOT-NULL guard on `ocsf_normalized` after backfill.
+- [ ] Unit tests covering ≥10 Splunk notable variants. **BOTS v3 loaded on founder's box NOT required** for unit tests — use canned notable JSON from the public Splunk BOTS repo (ships sample notable payloads under `notables/` in the BOTS v3 release tarball) + Splunk's published OCSF mapping examples. If BOTS v3 lands on the box mid-week, add a small integration-marked variant.
+- [ ] Mapper extension surface: `actor`, `src_endpoint`, `dst_endpoint` may need adding to `libs/ocsf` (currently scoped to Detection Finding root + Attack/MitreTechnique). Add only what the tests force.
 
 **Wk 4 — Ingest path end-to-end**
 - [ ] Splunk saved search + alert action → webhook to `/api/incidents/ingest` (with `X-Webhook-Secret` check).

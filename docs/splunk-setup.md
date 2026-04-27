@@ -149,16 +149,22 @@ wrong machine (dataset is large).
    May take 30+ minutes depending on box size. Tail `$SPLUNK_HOME/var/log/splunk/splunkd.log`.
 4. (If ES is installed) Enable CIM data model acceleration for the models the
    dataset populates: **Settings → Data Models → CIM_* → Acceleration**.
-5. Smoke:
+5. **Verify the load actually worked** — `earliest=0` is rejected on Splunk
+   10.0.2 (returns `Invalid earliest_time`). Use the BOTS time window
+   directly:
    ```
-   index=botsv3 earliest=0 | stats count
+   index=botsv3 earliest=2018-08-01T00:00:00 latest=2018-09-30T00:00:00
+     | stats count
    ```
-   Expect ~millions of events.
+   Expect ~millions of events. **If count is 0 the load did not succeed** —
+   re-run §6.3 and check `splunkd.log` for ingestion errors. (Wk 2 caught
+   exactly this: the wk-1 todo was ticked from documentation alone, not
+   from a verifying query, and BOTS data was missing on the founder's box.)
 6. **Time picker note:** BOTS v3 is 2018-era data. Eval runs must pin the
    time range to **2018-08-01 → 2018-09-01** (see repo README for the exact
    scenario window). The eval harness (wk 10) sets this automatically.
 
-Once loaded, tick the wk-1 todo box for BOTS v3.
+Once loaded — and verified by query — tick the BOTS v3 box.
 
 ---
 
