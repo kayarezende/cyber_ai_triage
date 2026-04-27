@@ -1,0 +1,13 @@
+{
+  "_time": "1745800200",
+  "_raw": "from=billing@payro1l-update.example to=eve@corp.local subject=Action Required: Verify Payroll Details verdict=phish_high_confidence",
+  "search_name": "Email - Inbound Phish Detected by Proofpoint - Rule",
+  "signature": "High-confidence phish: payroll-themed credential harvest",
+  "urgency": "high",
+  "user": "CORP\\eve",
+  "src_user": "billing@payro1l-update.example",
+  "annotations": {
+    "mitre_attack": "T1566.002,T1566.001"
+  },
+  "rid": "ES-RULE-EMAIL-005"
+}

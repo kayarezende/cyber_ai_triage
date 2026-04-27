@@ -1,0 +1,17 @@
+{
+  "_time": "1745794800",
+  "_raw": "11/27/2025 14:00:00 LogName=Security EventCode=4624 LogonType=3 TargetUserName=alice TargetDomainName=CORP IpAddress=10.0.5.42 IpPort=49152",
+  "search_name": "Endpoint - Successful Interactive Logon - Rule",
+  "signature": "Successful interactive logon",
+  "urgency": "informational",
+  "src": "wks-alice-01",
+  "src_ip": "10.0.5.42",
+  "dest": "dc01.corp.local",
+  "dest_ip": "10.0.0.10",
+  "dest_port": 445,
+  "user": "CORP\\alice",
+  "annotations": {
+    "mitre_attack": ["T1078"]
+  },
+  "rid": "ES-RULE-AUTH-001"
+}

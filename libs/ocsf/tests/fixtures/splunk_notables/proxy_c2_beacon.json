@@ -1,0 +1,15 @@
+{
+  "_time": "1745798400",
+  "_raw": "src_ip=10.0.5.42 dest_url=https://api.evil.example/beacon?id=ZjAwYmFy method=GET user_agent=Mozilla/5.0 status=200 bytes_in=42 bytes_out=812 interval_seconds=60",
+  "search_name": "Network - HTTP Periodic Beacon - Rule",
+  "signature": "Periodic 60s beacon to low-rep domain",
+  "urgency": "high",
+  "src": "wks-alice-01",
+  "src_ip": "10.0.5.42",
+  "dest": "api.evil.example",
+  "user": "CORP\\alice",
+  "annotations": {
+    "mitre_attack": ["T1071.001"]
+  },
+  "rid": "ES-RULE-PROXY-008"
+}

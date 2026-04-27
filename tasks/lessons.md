@@ -171,3 +171,28 @@ All 3 gates PASSED end-to-end. Several environment-specific gotchas surfaced; al
 - `mcp-splunk` came up healthy in 5 seconds; `/health` returns 200; `splunk_smoke --invoke` runs `siem_query` against `index=_internal | head 5` end-to-end through the container.
 - Confirms the full path: host langchain-mcp-adapters → docker network :8080 → FastMCP `/mcp` → splunk-sdk → Splunk LAN box → response → SiemQueryOutput → MCP content block back to host.
 - No issues surfaced — transport choice (ADR-0019) + `streamable_http` + Pydantic schema serialisation all integrated cleanly.
+
+---
+
+## Wk 3 (OCSF normalization layer)
+
+### `incidents.raw_payload_s3_key` + `incidents.ocsf_normalized` already existed — read schema before planning a migration
+- `tasks/todo.md` wk-3 brief said "Store raw + OCSF-normalized payloads in `incidents` table — `raw_payload_s3_key` (MinIO) + `ocsf_normalized` JSONB. Migration likely needs a NOT-NULL guard on `ocsf_normalized` after backfill." Both columns already shipped in the initial migration `81e2d43b3ec0_initial_schema.py` (lines 95–96). Plan agent caught this on a `grep` pass; the original brief was written from a stale read.
+- **Rule:** before scoping an Alembic migration in a plan, grep `db/migrations/versions/` for the target column names. Existing-but-forgotten columns are common in early-stage repos because the initial schema lands speculatively ahead of the consumer code.
+
+### `MitreTechnique` validator only enforces alphabetic-leading + non-empty — it does NOT filter T-codes
+- Plan agent initially proposed reusing `MitreTechnique`'s `_normalize_technique_uid` validator (`detection_finding.py:185`) to filter Splunk's `annotations.mitre_attack` strings. Re-read showed it only rejects empty / non-alphabetic-leading. Tactic codes (`TA0002`) and free text (`foo`) would have constructed bogus `MitreTechnique` rows instead of being silently dropped.
+- Fix: mapper-side regex `^T\d+(\.\d+)?$` BEFORE constructing the model. Two dedicated tests pin this (`test_tactic_code_filtered`, `test_non_tcode_filtered`).
+- **Rule:** when a plan says "filter via existing validator X", read X. Validators are usually tighter on shape than semantics; semantic filtering belongs at the call site that knows domain rules.
+
+### Defer storage helpers until the bytes-to-key contract has a caller
+- `libs/common/storage.py` (MinIO upload helper) was tempting to ship in wk 3 alongside the mapper. Resisted. Wk-4 ingest webhook owns the bytes-to-key contract (key naming convention, content-hash dedup, error handling on MinIO down) — designing it in wk 3 with no caller would have meant guessing the contract.
+- **Rule:** infrastructure helpers should be designed by their first caller, not pre-built ahead of one. Plan to ship them with the consumer week.
+
+### Sub-model surface: add only what realistic input shape forces
+- `DetectionFinding` extension added `User`, `Actor`, `NetworkEndpoint` (forced by every realistic Splunk notable having `user` / `src_ip` / `dest_ip`). Deferred `Device`, `File`, `Process`, `Evidences[]`, `Enrichments[]` to wk-6 when the investigation agent's enrichment pipeline forces them.
+- **Rule:** new schema surface has a maintenance cost (model + tests + serialisation paths + `to_hec_dict` namespacing). Delay until a concrete consumer needs each field.
+
+### Pydantic v2 reserves leading-underscore field names — alias Splunk's `_time` / `_raw`
+- Splunk notables ship `_time` (epoch) and `_raw` (full event text). Pydantic v2 raises if you declare model fields starting with underscore. Solution: declare as `notable_time: float | str = Field(..., alias="_time")` + `model_config = ConfigDict(populate_by_name=True, extra="allow")`.
+- **Rule:** for any Pydantic v2 model that mirrors an external JSON shape, scan for leading-underscore field names up front and alias them. `populate_by_name=True` is needed if any internal code constructs by attribute name rather than by alias.

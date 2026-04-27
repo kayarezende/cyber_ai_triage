@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from sentient_ocsf import (
     OCSF_VERSION,
+    Actor,
     Analytic,
     AnalyticTypeId,
     Attack,
@@ -21,8 +22,10 @@ from sentient_ocsf import (
     FindingInfo,
     Metadata,
     MitreTechnique,
+    NetworkEndpoint,
     Product,
     SeverityId,
+    User,
     Verdict,
     validate_detection_finding,
 )
@@ -214,3 +217,79 @@ class TestValidateDetectionFinding:
         raw["class_uid"] = 9999
         with pytest.raises(ValidationError):
             validate_detection_finding(raw)
+
+
+class TestActorEndpointSubmodels:
+    """Wk-3: User / Actor / NetworkEndpoint surface added for the Splunk mapper."""
+
+    def test_user_minimal(self) -> None:
+        u = User(name="alice")
+        assert u.name == "alice"
+
+    def test_user_all_none_default(self) -> None:
+        u = User()
+        assert u.name is None
+
+    def test_user_extra_forbidden(self) -> None:
+        with pytest.raises(ValidationError):
+            User(name="alice", role="admin")  # type: ignore[call-arg]
+
+    def test_actor_with_user(self) -> None:
+        a = Actor(user=User(name="DOMAIN\\alice"))
+        assert a.user is not None
+        assert a.user.name == "DOMAIN\\alice"
+
+    def test_actor_extra_forbidden(self) -> None:
+        with pytest.raises(ValidationError):
+            Actor(user=User(name="x"), process={"pid": 1})  # type: ignore[call-arg]
+
+    def test_endpoint_ipv4(self) -> None:
+        e = NetworkEndpoint(ip="10.0.0.1", hostname="host", port=443)
+        assert e.ip == "10.0.0.1"
+        assert e.port == 443
+
+    def test_endpoint_ipv6(self) -> None:
+        e = NetworkEndpoint(ip="2001:db8::1")
+        assert e.ip == "2001:db8::1"
+
+    @pytest.mark.parametrize("marker", ["", "-", "unknown", "null", "  "])
+    def test_endpoint_null_markers_become_none(self, marker: str) -> None:
+        e = NetworkEndpoint(ip=marker)
+        assert e.ip is None
+
+    def test_endpoint_garbage_ip_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            NetworkEndpoint(ip="999.999.999.999")
+
+    @pytest.mark.parametrize("port", [-1, 65536, 99999])
+    def test_endpoint_port_out_of_range(self, port: int) -> None:
+        with pytest.raises(ValidationError):
+            NetworkEndpoint(port=port)
+
+    def test_endpoint_all_none_default(self) -> None:
+        e = NetworkEndpoint()
+        assert e.ip is None
+        assert e.hostname is None
+        assert e.port is None
+
+    def test_endpoint_extra_forbidden(self) -> None:
+        with pytest.raises(ValidationError):
+            NetworkEndpoint(ip="10.0.0.1", mac="aa:bb:cc:dd:ee:ff")  # type: ignore[call-arg]
+
+    def test_detection_finding_carries_actor_and_endpoints(self) -> None:
+        df = DetectionFinding(
+            severity_id=SeverityId.MEDIUM,
+            time=1,
+            metadata=Metadata(product=Product(name="x", vendor_name="x")),
+            finding_info=FindingInfo(uid="x", title="x"),
+            actor=Actor(user=User(name="alice")),
+            src_endpoint=NetworkEndpoint(ip="10.0.0.1"),
+            dst_endpoint=NetworkEndpoint(ip="10.0.0.2", port=443),
+        )
+        assert df.actor is not None
+        assert df.actor.user is not None
+        assert df.actor.user.name == "alice"
+        assert df.src_endpoint is not None
+        assert df.src_endpoint.ip == "10.0.0.1"
+        assert df.dst_endpoint is not None
+        assert df.dst_endpoint.port == 443

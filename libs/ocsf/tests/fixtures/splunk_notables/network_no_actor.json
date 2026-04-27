@@ -1,0 +1,12 @@
+{
+  "_time": "1745797800",
+  "_raw": "src_ip=198.51.100.77 ports_scanned=22,23,25,80,443,445,3306,3389,5900,8080 duration=12s",
+  "search_name": "Network - External Port Scan Detected - Rule",
+  "signature": "External host scanned 10+ ports in 12s",
+  "urgency": "medium",
+  "src_ip": "198.51.100.77",
+  "annotations": {
+    "mitre_attack": ["T1046"]
+  },
+  "rid": "ES-RULE-NETWORK-002"
+}

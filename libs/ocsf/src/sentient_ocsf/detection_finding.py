@@ -17,6 +17,7 @@ prefix when serialised to HEC to avoid future-OCSF collision.
 
 from __future__ import annotations
 
+import ipaddress
 from enum import IntEnum
 from typing import Any, Literal, Self
 
@@ -210,6 +211,63 @@ class Attack(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Actor + endpoint sub-models (wk-3 Splunk-notable mapper surface)
+# ---------------------------------------------------------------------------
+
+
+class User(BaseModel):
+    """OCSF `user_t` — minimum surface.
+
+    Splunk notables typically give us a single string (bare username,
+    DOMAIN\\user, UPN, ARN, email). Don't parse — store raw in `name`.
+    Further sub-fields (`email_addr`, `domain`, `account`, `groups`) added
+    when a real notable variant forces them.
+    """
+
+    name: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class Actor(BaseModel):
+    """OCSF `actor_t` — wk-3 surface is `user` only.
+
+    `process` deferred to wk-6 when the investigation agent's process-tree
+    enrichment lands.
+    """
+
+    user: User | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class NetworkEndpoint(BaseModel):
+    """OCSF `network_endpoint_t` — minimum surface (ip + hostname + port).
+
+    `_coerce_ip` tolerates Splunk's null markers (`""`, `"-"`, `"unknown"`,
+    `"null"`) and returns `None` for them. Genuine garbage IPs raise via
+    `ipaddress.ip_address()` — fail loud at ingest so the analyst sees it.
+    """
+
+    ip: str | None = None
+    hostname: str | None = None
+    port: int | None = Field(default=None, ge=0, le=65535)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("ip", mode="before")
+    @classmethod
+    def _coerce_ip(cls, v: Any) -> Any:
+        if v is None or not isinstance(v, str):
+            return v
+        s = v.strip()
+        if s in ("", "-", "unknown", "null"):
+            return None
+        ipaddress.ip_address(s)
+        return s
+
+
+# ---------------------------------------------------------------------------
 # Detection Finding root
 # ---------------------------------------------------------------------------
 
@@ -249,6 +307,9 @@ class DetectionFinding(BaseModel):
     disposition_id: Disposition | None = None
     disposition: str | None = None
     attacks: list[Attack] = Field(default_factory=list)
+    actor: Actor | None = None
+    src_endpoint: NetworkEndpoint | None = None
+    dst_endpoint: NetworkEndpoint | None = None
     message: str | None = Field(
         default=None,
         description="Short human-readable verdict summary.",
@@ -318,6 +379,7 @@ def validate_detection_finding(payload: dict[str, Any]) -> DetectionFinding:
 
 __all__ = [
     "OCSF_VERSION",
+    "Actor",
     "Analytic",
     "AnalyticTypeId",
     "Attack",
@@ -330,8 +392,10 @@ __all__ = [
     "Metadata",
     "MitreTactic",
     "MitreTechnique",
+    "NetworkEndpoint",
     "Product",
     "SeverityId",
+    "User",
     "Verdict",
     "validate_detection_finding",
 ]

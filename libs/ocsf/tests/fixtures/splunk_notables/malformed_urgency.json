@@ -1,0 +1,13 @@
+{
+  "_time": "1745801400",
+  "search_name": "Endpoint - Custom Detection - Rule",
+  "signature": "Operator-defined detection fired",
+  "urgency": "bogus",
+  "src": "wks-frank-08",
+  "src_ip": "10.0.5.66",
+  "user": "CORP\\frank",
+  "annotations": {
+    "mitre_attack": ["T1059", "TA0002", "foo", "T1059.003"]
+  },
+  "rid": "ES-RULE-CUSTOM-099"
+}

@@ -1,0 +1,14 @@
+{
+  "_time": "1745795400",
+  "_raw": "11/27/2025 14:10:00 LogName=Security EventCode=4625 SubStatus=0xC000006A failure_count=47 IpAddress=203.0.113.55",
+  "search_name": "Access - Excessive Failed Logins - Rule",
+  "signature": "47 failed logons within 60s from single source",
+  "urgency": "medium",
+  "src_ip": "203.0.113.55",
+  "dest": "vpn-gw-01",
+  "dest_ip": "10.0.0.5",
+  "annotations": {
+    "mitre_attack": ["T1110", "T1110.001"]
+  },
+  "rid": "ES-RULE-AUTH-002"
+}

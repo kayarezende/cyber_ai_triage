@@ -1,0 +1,16 @@
+{
+  "_time": "1745799600",
+  "_raw": "DLP_RULE=PII_LEAVING_NETWORK file_count=412 total_bytes=914829312 destination=external upload_target=mega.nz",
+  "search_name": "DLP - Bulk PII Exfiltration to External Storage - Rule",
+  "signature": "412 files / 872MB matched PII rule, uploaded to mega.nz",
+  "urgency": "critical",
+  "src": "wks-dave-22",
+  "src_ip": "10.0.5.122",
+  "dest": "mega.nz",
+  "dest_ip": "31.216.144.12",
+  "user": "CORP\\dave",
+  "annotations": {
+    "mitre_attack": ["T1041", "T1071", "T1567.002"]
+  },
+  "rid": "ES-RULE-DLP-001"
+}

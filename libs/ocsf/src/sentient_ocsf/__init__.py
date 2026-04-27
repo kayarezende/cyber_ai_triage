@@ -14,6 +14,7 @@ Splunk-notable normalisation. Same root class — just more fields populated.
 
 from sentient_ocsf.detection_finding import (
     OCSF_VERSION,
+    Actor,
     Analytic,
     AnalyticTypeId,
     Attack,
@@ -26,14 +27,18 @@ from sentient_ocsf.detection_finding import (
     Metadata,
     MitreTactic,
     MitreTechnique,
+    NetworkEndpoint,
     Product,
     SeverityId,
+    User,
     Verdict,
     validate_detection_finding,
 )
+from sentient_ocsf.splunk_mapper import SplunkNotable, map_notable_to_ocsf
 
 __all__ = [
     "OCSF_VERSION",
+    "Actor",
     "Analytic",
     "AnalyticTypeId",
     "Attack",
@@ -46,8 +51,12 @@ __all__ = [
     "Metadata",
     "MitreTactic",
     "MitreTechnique",
+    "NetworkEndpoint",
     "Product",
     "SeverityId",
+    "SplunkNotable",
+    "User",
     "Verdict",
+    "map_notable_to_ocsf",
     "validate_detection_finding",
 ]

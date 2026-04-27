@@ -1,0 +1,16 @@
+{
+  "_time": "1745797200",
+  "_raw": "src_ip=10.0.5.99 dest_ip=8.8.8.8 query=aGVsbG8td29ybGQtdGhpcy1pcy1leGZpbA.evil.example record_type=TXT response_size=1187",
+  "search_name": "Network - DNS TXT Burst Likely Tunnel - Rule",
+  "signature": "Anomalous TXT record volume from internal host",
+  "urgency": "high",
+  "src": "wks-carol-12",
+  "src_ip": "10.0.5.99",
+  "dest": "ns.evil.example",
+  "dest_ip": "8.8.8.8",
+  "dest_port": 53,
+  "annotations": {
+    "mitre_attack": ["T1071.004", "T1041"]
+  },
+  "rid": "ES-RULE-NETWORK-031"
+}
