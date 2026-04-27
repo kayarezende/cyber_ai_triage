@@ -17,8 +17,13 @@ import pytest
 from langchain_core.tools import tool
 
 from sentient_orchestrator.investigation import nodes
+from sentient_orchestrator.investigation.detection_rules import (
+    DetectionRule,
+    RuleMatch,
+)
 from sentient_orchestrator.investigation.nodes import (
     agent_node,
+    apply_detection_rules_node,
     correlate_node,
     draft_verdict_node,
     plan_node,
@@ -736,3 +741,174 @@ async def test_review_node_no_draft_skips() -> None:
     delta = await review_node({}, config=_config(finding=finding))  # type: ignore[arg-type]
     assert delta["review_output"]["status"] == "skipped"
     assert delta["review_output"]["notes"] == "no_draft_verdict_to_review"
+
+
+# ----------------------------------------- apply_detection_rules_node (wk-8)
+
+
+def _matched_rule(name: str, override: str | None = "high") -> RuleMatch:
+    return RuleMatch(
+        rule_id=name,
+        rule_name=name,
+        matched_required=("T1003",),
+        matched_any=(),
+        severity_override=override,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_detection_rules_raises_severity_when_rule_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    emit_calls: list[tuple[str, dict[str, Any]]],
+) -> None:
+    monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    monkeypatch.setattr(
+        nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [
+            DetectionRule(
+                id="r1",
+                name="ransomware_kill_chain",
+                required_techniques=("T1003",),
+                any_techniques=(),
+                severity_override="critical",
+                enabled=True,
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [
+            _matched_rule("ransomware_kill_chain", override="critical")
+        ]
+    )
+    monkeypatch.setattr(
+        nodes, "effective_severity", lambda _agent, _matches: "critical"
+    )
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _track(_conn: object, **kwargs: Any) -> None:
+        captured.append(("detection_rules_evaluated", kwargs))
+
+    monkeypatch.setattr(
+        nodes.audit, "emit_detection_rules_evaluated", _track
+    )
+
+    state = {
+        "draft_verdict": {
+            "verdict": "true_positive",
+            "confidence": 80,
+            "severity": "medium",
+            "mitre_techniques": ["T1003"],
+        }
+    }
+    delta = await apply_detection_rules_node(state, _config())  # type: ignore[arg-type]
+    assert delta["draft_verdict"]["severity"] == "critical"
+    assert delta["draft_verdict"]["verdict"] == "true_positive"
+    assert delta["detection_rule_matches"][0]["rule_name"] == "ransomware_kill_chain"
+    assert captured[0][1]["severity_overridden"] is True
+
+
+@pytest.mark.asyncio
+async def test_apply_detection_rules_leaves_severity_when_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+    emit_calls: list[tuple[str, dict[str, Any]]],
+) -> None:
+    monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    monkeypatch.setattr(nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [])
+    monkeypatch.setattr(
+        nodes, "evaluate_rules", lambda _r, *, mitre_techniques: []
+    )
+    monkeypatch.setattr(
+        nodes, "effective_severity", lambda agent, _matches: agent
+    )
+    monkeypatch.setattr(
+        nodes.audit,
+        "emit_detection_rules_evaluated",
+        lambda _conn, **_kw: None,
+    )
+
+    state = {
+        "draft_verdict": {
+            "verdict": "true_positive",
+            "confidence": 80,
+            "severity": "high",
+            "mitre_techniques": [],
+        }
+    }
+    delta = await apply_detection_rules_node(state, _config())  # type: ignore[arg-type]
+    assert delta["draft_verdict"]["severity"] == "high"
+    assert delta["detection_rule_matches"] == []
+
+
+@pytest.mark.asyncio
+async def test_apply_detection_rules_emits_audit_with_match_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    monkeypatch.setattr(
+        nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [
+            DetectionRule(
+                id="r-floor",
+                name="valid_accounts_only",
+                required_techniques=("T1078",),
+                any_techniques=(),
+                severity_override="low",
+                enabled=True,
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [
+            _matched_rule("valid_accounts_only", override="low")
+        ]
+    )
+    monkeypatch.setattr(
+        nodes, "effective_severity", lambda agent, _matches: agent
+    )
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _track(_conn: object, **kwargs: Any) -> None:
+        captured.append(("audit", kwargs))
+
+    monkeypatch.setattr(
+        nodes.audit, "emit_detection_rules_evaluated", _track
+    )
+
+    state = {
+        "draft_verdict": {
+            "verdict": "true_positive",
+            "confidence": 80,
+            "severity": "high",
+            "mitre_techniques": ["T1078"],
+        }
+    }
+    await apply_detection_rules_node(state, _config())  # type: ignore[arg-type]
+    assert len(captured) == 1
+    kw = captured[0][1]
+    assert kw["matched_rules"] == ["valid_accounts_only"]
+    assert kw["evaluated_count"] == 1
+    assert kw["matched_count"] == 1
+    # Floor-only rule: agent_severity already higher → no override.
+    assert kw["severity_overridden"] is False
+
+
+@pytest.mark.asyncio
+async def test_apply_detection_rules_handles_empty_techniques(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    monkeypatch.setattr(nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [])
+    monkeypatch.setattr(nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [])
+    monkeypatch.setattr(
+        nodes, "effective_severity", lambda agent, _matches: agent
+    )
+    monkeypatch.setattr(
+        nodes.audit,
+        "emit_detection_rules_evaluated",
+        lambda _conn, **_kw: None,
+    )
+
+    state = {"draft_verdict": {"verdict": "benign", "severity": "info"}}
+    delta = await apply_detection_rules_node(state, _config())  # type: ignore[arg-type]
+    assert delta["draft_verdict"]["severity"] == "info"
+    assert delta["detection_rule_matches"] == []

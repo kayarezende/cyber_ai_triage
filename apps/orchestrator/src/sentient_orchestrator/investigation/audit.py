@@ -308,9 +308,175 @@ def emit_manifest_upload_failed(
     )
 
 
+def emit_detection_rules_evaluated(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    evaluated_count: int,
+    matched_count: int,
+    matched_rules: list[str],
+    agent_severity: str,
+    effective_severity: str,
+    severity_overridden: bool,
+) -> None:
+    """Wk-8. Deterministic detection-rule pass output."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="detection_rules_evaluated",
+        details=walk_and_sanitize(
+            {
+                "evaluated_count": evaluated_count,
+                "matched_count": matched_count,
+                "matched_rules": matched_rules,
+                "agent_severity": agent_severity,
+                "effective_severity": effective_severity,
+                "severity_overridden": severity_overridden,
+            },
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
+def emit_awaiting_approval(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    policy_id: UUID | None,
+    policy_name: str,
+    decision_ctx: dict[str, Any],
+) -> None:
+    """Wk-8. HITL gate fired; investigation is interrupted pending analyst."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="awaiting_approval",
+        details=walk_and_sanitize(
+            {
+                "policy_id": str(policy_id) if policy_id else None,
+                "policy_name": policy_name,
+                "decision_ctx": decision_ctx,
+            },
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
+def emit_approval_received(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    approver_id: str | None,
+    approved: bool,
+    notes: str,
+    policy_id: UUID | None,
+    policy_name: str,
+) -> None:
+    """Wk-8. Analyst approved or rejected (or HITL auto-approved)."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="approval_received",
+        details=walk_and_sanitize(
+            {
+                "approver_id": approver_id,
+                "approved": approved,
+                "notes": notes,
+                "policy_id": str(policy_id) if policy_id else None,
+                "policy_name": policy_name,
+            },
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
+def emit_writeback_attempted(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    mode: str,
+    hec_index: str | None,
+    notable_update_target: str | None,
+) -> None:
+    """Wk-8. About to push the verdict back to Splunk."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="writeback_attempted",
+        details=walk_and_sanitize(
+            {
+                "mode": mode,
+                "hec_index": hec_index,
+                "notable_update_target": notable_update_target,
+            },
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
+def emit_writeback_succeeded(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    mode: str,
+    attempts: list[dict[str, Any]],
+) -> None:
+    """Wk-8. All writeback paths succeeded."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="writeback_succeeded",
+        details=walk_and_sanitize(
+            {"mode": mode, "attempts": attempts},
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
+def emit_writeback_failed(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    mode: str,
+    attempts: list[dict[str, Any]],
+    error: str,
+) -> None:
+    """Wk-8. At least one writeback path failed; verdict still committed."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="writeback_failed",
+        details=walk_and_sanitize(
+            {"mode": mode, "attempts": attempts, "error": error},
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
 __all__ = [
     "ACTOR",
+    "emit_approval_received",
+    "emit_awaiting_approval",
     "emit_budget_exceeded",
+    "emit_detection_rules_evaluated",
     "emit_investigation_complete",
     "emit_investigation_failed",
     "emit_investigation_started",
@@ -322,4 +488,7 @@ __all__ = [
     "emit_review_started",
     "emit_tool_call",
     "emit_verdict_drafted",
+    "emit_writeback_attempted",
+    "emit_writeback_failed",
+    "emit_writeback_succeeded",
 ]

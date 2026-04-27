@@ -208,7 +208,61 @@ async def run_tier2_investigation(
         )
         return
 
-    # 4. Finalize success.
+    # 4. Detect HITL interrupt — graph paused at `await_approval_node`.
+    #    incidents.status='awaiting_approval' + investigations.approval_status=
+    #    'pending' already written by the node. The resumer (cli_resume.py for
+    #    wk-8; web UI for wk-9) will re-enter via `Command(resume=...)` and
+    #    eventually call `_finalize_after_graph`. We do nothing else here.
+    if _is_interrupted(final_state):
+        log.info(
+            "tier-2 interrupted at await_approval; pending analyst",
+            investigation_id=str(investigation_id),
+        )
+        return
+
+    # 5. Finalize success / inconclusive.
+    await _finalize_after_graph(
+        investigation_id=investigation_id,
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        finding=finding,
+        final_state=cast(InvestigationState, final_state),
+    )
+
+
+def _is_interrupted(final_state: Any) -> bool:
+    """Detect a LangGraph `interrupt()` pause across minor-version API shifts.
+
+    1.x sets `__interrupt__` in state; defence-in-depth: also treat
+    `approval_status == 'pending'` as an interrupt indicator (the node sets
+    this before calling `interrupt()` and `writeback_status` is unset because
+    the writeback node never ran).
+    """
+    if not isinstance(final_state, dict):
+        return False
+    if "__interrupt__" in final_state:
+        return True
+    if (
+        final_state.get("approval_status") == "pending"
+        and final_state.get("writeback_status") is None
+    ):
+        return True
+    return False
+
+
+async def _finalize_after_graph(
+    *,
+    investigation_id: UUID,
+    tenant_id: UUID,
+    incident_id: UUID,
+    finding: DetectionFinding,
+    final_state: InvestigationState,
+) -> None:
+    """Finalize after the graph has run to completion (no interrupt).
+
+    Called from both `run_tier2_investigation` (initial) and `cli_resume.py`
+    (after `Command(resume=...)`).
+    """
     draft = final_state.get("draft_verdict") if final_state else None
     if not draft:
         await _finalize_inconclusive(
@@ -229,12 +283,21 @@ async def run_tier2_investigation(
         incident_id=incident_id,
         verdict=verdict,
         review=review_output,
+        approval_status=final_state.get("approval_status"),
+        approver_id=final_state.get("approver_id"),
+        approval_notes=final_state.get("approval_notes"),
+        writeback_status=final_state.get("writeback_status"),
+        writeback_attempts=list(final_state.get("writeback_attempts") or []),
+        detection_rule_matches=list(
+            final_state.get("detection_rule_matches") or []
+        ),
     )
     log.info(
         "tier-2 investigation complete",
         investigation_id=str(investigation_id),
         verdict=verdict.verdict,
         confidence=verdict.confidence,
+        writeback_status=final_state.get("writeback_status"),
     )
 
     # Manifest upload is best-effort. The verdict is already finalized + the
@@ -245,7 +308,7 @@ async def run_tier2_investigation(
         investigation_id=investigation_id,
         incident_id=incident_id,
         finding=finding,
-        final_state=cast(InvestigationState, final_state),
+        final_state=final_state,
         verdict=verdict,
         review=review_output,
     )
@@ -339,6 +402,12 @@ async def _finalize_done(
     incident_id: UUID,
     verdict: InvestigationOutput,
     review: dict[str, Any] | None,
+    approval_status: str | None = None,
+    approver_id: str | None = None,
+    approval_notes: str | None = None,
+    writeback_status: str | None = None,
+    writeback_attempts: list[dict[str, Any]] | None = None,
+    detection_rule_matches: list[dict[str, Any]] | None = None,
 ) -> None:
     completed_at = datetime.now(UTC)
     with tenant_session(tenant_id) as conn:
@@ -354,6 +423,16 @@ async def _finalize_done(
                 investigation_id=investigation_id,
                 review=review,
             )
+        _update_investigation_wk8_surface(
+            conn,
+            investigation_id=investigation_id,
+            approval_status=approval_status,
+            approver_id=approver_id,
+            approval_notes=approval_notes,
+            writeback_status=writeback_status,
+            writeback_attempts=writeback_attempts or [],
+            detection_rule_matches=detection_rule_matches or [],
+        )
         conn.execute(
             text("UPDATE incidents SET status = 'done' WHERE id = :id"),
             {"id": str(incident_id)},
@@ -435,6 +514,74 @@ def _update_investigation_with_verdict(
             "summary": verdict.summary,
             "ocsf": json.dumps(verdict.model_dump()),
             "completed_at": completed_at,
+        },
+    )
+
+
+def _update_investigation_wk8_surface(
+    conn: Connection,
+    *,
+    investigation_id: UUID,
+    approval_status: str | None,
+    approver_id: str | None,
+    approval_notes: str | None,
+    writeback_status: str | None,
+    writeback_attempts: list[dict[str, Any]],
+    detection_rule_matches: list[dict[str, Any]],
+) -> None:
+    """Wk-8. Persist HITL + writeback + detection-rule fields.
+
+    The `approver_id` column is the application-level mirror — always set when
+    an analyst-supplied identifier was provided (string form, UUID-validated).
+    `human_approved_by` is the FK to `users.id`. To avoid a FK-violation
+    rollback when the analyst's UUID isn't a real user (CLI dev hack;
+    misconfigured wk-9 UI), we resolve it via a subquery `(SELECT id FROM
+    users WHERE id = :candidate)` — missing user → NULL → `COALESCE` preserves
+    the existing FK column.
+    """
+    candidate_uuid = None
+    if approver_id:
+        try:
+            candidate_uuid = str(UUID(approver_id))
+        except ValueError:
+            candidate_uuid = None
+    conn.execute(
+        text(
+            """
+            WITH resolved AS (
+                SELECT id AS user_id
+                  FROM users
+                 WHERE id = CAST(:candidate AS UUID)
+            )
+            UPDATE investigations
+               SET approval_status = :approval_status,
+                   approver_id = :approver_id,
+                   approval_notes = :approval_notes,
+                   writeback_status = :writeback_status,
+                   writeback_attempts = CAST(:writeback_attempts AS jsonb),
+                   detection_rule_matches = CAST(:detection_rule_matches AS jsonb),
+                   human_approved_by = COALESCE(
+                       (SELECT user_id FROM resolved),
+                       human_approved_by
+                   ),
+                   human_approved_at = CASE
+                       WHEN (SELECT user_id FROM resolved) IS NOT NULL
+                            AND human_approved_at IS NULL
+                            THEN NOW()
+                       ELSE human_approved_at
+                   END
+             WHERE id = :id
+            """
+        ),
+        {
+            "id": str(investigation_id),
+            "approval_status": approval_status,
+            "approver_id": candidate_uuid,
+            "approval_notes": approval_notes,
+            "writeback_status": writeback_status,
+            "writeback_attempts": json.dumps(writeback_attempts),
+            "detection_rule_matches": json.dumps(detection_rule_matches),
+            "candidate": candidate_uuid,
         },
     )
 

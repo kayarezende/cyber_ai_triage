@@ -192,7 +192,7 @@ def build_evidence_manifest(
         "review": review,
         "review_notes": (review or {}).get("notes") if review else None,
         "mitre_techniques": list(verdict.mitre_techniques),
-        "rule_matches": [],  # wk-8 detection rules
+        "rule_matches": list(final_state.get("detection_rule_matches") or []),
         "final_output": {"ocsf": verdict.model_dump(mode="json")},
         "token_usage": token_usage,
         "attempts": attempts,

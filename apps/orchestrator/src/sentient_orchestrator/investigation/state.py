@@ -67,6 +67,24 @@ class InvestigationState(TypedDict, total=False):
     # the verdict). Round-tripped through the LangGraph checkpointer.
     review_output: dict[str, Any] | None
 
+    # Wk-8. Detection-rule matches populated by `apply_detection_rules_node`
+    # (sits after `review`). Each entry: {rule_id, rule_name, matched_required,
+    # matched_any, severity_override}.
+    detection_rule_matches: list[dict[str, Any]]
+
+    # Wk-8. HITL approval surface populated by `await_approval_node`.
+    # `pending` is set inline before the LangGraph `interrupt()` fires;
+    # `approved` / `rejected` arrive via the `Command(resume=...)` payload.
+    # `auto` indicates the active HITL policy returned False (no human gate).
+    approval_status: Literal["pending", "approved", "rejected", "auto"]
+    approver_id: str | None
+    approval_notes: str | None
+
+    # Wk-8. Dual writeback surface populated by `writeback_node`. `attempts`
+    # captures one entry per HEC / notable_update call: {tool, ok, detail}.
+    writeback_status: Literal["pending", "succeeded", "failed", "skipped"]
+    writeback_attempts: list[dict[str, Any]]
+
 
 class InvestigationOutput(BaseModel):
     """Tier-2 verdict surface emitted by the draft_verdict node."""

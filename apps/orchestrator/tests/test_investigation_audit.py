@@ -11,12 +11,18 @@ import pytest
 from sentient_orchestrator.investigation import audit as audit_module
 from sentient_orchestrator.investigation.audit import (
     ACTOR,
+    emit_approval_received,
+    emit_awaiting_approval,
+    emit_detection_rules_evaluated,
     emit_investigation_complete,
     emit_investigation_failed,
     emit_investigation_started,
     emit_llm_call,
     emit_tool_call,
     emit_verdict_drafted,
+    emit_writeback_attempted,
+    emit_writeback_failed,
+    emit_writeback_succeeded,
 )
 
 TENANT = UUID("11111111-1111-1111-1111-111111111111")
@@ -165,3 +171,127 @@ def test_investigation_failed_sanitizes_error(captured: list[dict[str, Any]]) ->
     assert call["details"]["error_type"] == "FallbackChainExhausted"
     assert call["details"]["error_message"] == "all attempts failed"
     assert call["details"]["reason"] == "timeout_chain"
+
+
+# --- wk-8 emitters -------------------------------------------------------
+
+
+def test_detection_rules_evaluated_emits_match_summary(
+    captured: list[dict[str, Any]],
+) -> None:
+    emit_detection_rules_evaluated(
+        MagicMock(),
+        tenant_id=TENANT,
+        investigation_id=INV,
+        evaluated_count=10,
+        matched_count=2,
+        matched_rules=["ransomware_kill_chain", "data_exfil_over_c2"],
+        agent_severity="medium",
+        effective_severity="critical",
+        severity_overridden=True,
+    )
+    call = captured[0]
+    assert call["action"] == "detection_rules_evaluated"
+    assert call["actor"] == ACTOR
+    details = call["details"]
+    assert details["matched_count"] == 2
+    assert "ransomware_kill_chain" in details["matched_rules"]
+    assert details["severity_overridden"] is True
+    assert details["agent_severity"] == "medium"
+    assert details["effective_severity"] == "critical"
+
+
+def test_awaiting_approval_emits_policy_and_decision_ctx(
+    captured: list[dict[str, Any]],
+) -> None:
+    pid = UUID("44444444-4444-4444-4444-444444444444")
+    emit_awaiting_approval(
+        MagicMock(),
+        tenant_id=TENANT,
+        investigation_id=INV,
+        policy_id=pid,
+        policy_name="default_require_approval",
+        decision_ctx={"severity": "high", "verdict": "true_positive"},
+    )
+    call = captured[0]
+    assert call["action"] == "awaiting_approval"
+    details = call["details"]
+    assert details["policy_id"] == str(pid)
+    assert details["policy_name"] == "default_require_approval"
+    assert details["decision_ctx"]["severity"] == "high"
+
+
+def test_approval_received_emits_decision_and_approver(
+    captured: list[dict[str, Any]],
+) -> None:
+    emit_approval_received(
+        MagicMock(),
+        tenant_id=TENANT,
+        investigation_id=INV,
+        approver_id="55555555-5555-5555-5555-555555555555",
+        approved=True,
+        notes="looks good\x00",
+        policy_id=None,
+        policy_name="default_require_approval",
+    )
+    call = captured[0]
+    assert call["action"] == "approval_received"
+    details = call["details"]
+    assert details["approved"] is True
+    assert details["approver_id"] == "55555555-5555-5555-5555-555555555555"
+    assert "\x00" not in details["notes"]
+    assert details["policy_id"] is None
+
+
+def test_writeback_attempted_emits_mode_and_targets(
+    captured: list[dict[str, Any]],
+) -> None:
+    emit_writeback_attempted(
+        MagicMock(),
+        tenant_id=TENANT,
+        investigation_id=INV,
+        mode="dual",
+        hec_index="triage_verdicts",
+        notable_update_target="notable-abc",
+    )
+    call = captured[0]
+    assert call["action"] == "writeback_attempted"
+    details = call["details"]
+    assert details["mode"] == "dual"
+    assert details["hec_index"] == "triage_verdicts"
+    assert details["notable_update_target"] == "notable-abc"
+
+
+def test_writeback_succeeded_emits_attempts_payload(
+    captured: list[dict[str, Any]],
+) -> None:
+    emit_writeback_succeeded(
+        MagicMock(),
+        tenant_id=TENANT,
+        investigation_id=INV,
+        mode="hec_only",
+        attempts=[{"tool": "siem_hec_post", "ok": True, "detail": {"response": "ok"}}],
+    )
+    call = captured[0]
+    assert call["action"] == "writeback_succeeded"
+    assert call["details"]["mode"] == "hec_only"
+    assert call["details"]["attempts"][0]["tool"] == "siem_hec_post"
+
+
+def test_writeback_failed_emits_error_and_attempts(
+    captured: list[dict[str, Any]],
+) -> None:
+    emit_writeback_failed(
+        MagicMock(),
+        tenant_id=TENANT,
+        investigation_id=INV,
+        mode="dual",
+        attempts=[
+            {"tool": "siem_hec_post", "ok": False, "detail": {"error_type": "RuntimeError"}}
+        ],
+        error="hec_failed",
+    )
+    call = captured[0]
+    assert call["action"] == "writeback_failed"
+    assert call["details"]["error"] == "hec_failed"
+    assert call["details"]["attempts"][0]["ok"] is False

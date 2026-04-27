@@ -18,6 +18,7 @@ import pytest
 
 from sentient_orchestrator.investigation import runner as runner_mod
 from sentient_orchestrator.investigation.runner import (
+    _is_interrupted,
     _make_thread_id,
     _pg_text_array,
     _strip_psycopg_dsn,
@@ -495,3 +496,46 @@ def test_strip_psycopg_dsn() -> None:
     assert _strip_psycopg_dsn("postgresql+psycopg://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"
     # No-op on already-stripped form.
     assert _strip_psycopg_dsn("postgresql://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"
+
+
+# --- _is_interrupted (wk-8) ---------------------------------------------
+
+
+def test_is_interrupted_rejects_non_dict() -> None:
+    assert _is_interrupted(None) is False
+    assert _is_interrupted("not a dict") is False
+    assert _is_interrupted(["list"]) is False
+
+
+def test_is_interrupted_via_explicit_marker() -> None:
+    assert _is_interrupted({"__interrupt__": [{"value": "x"}]}) is True
+
+
+def test_is_interrupted_via_pending_status_signal() -> None:
+    """Defence-in-depth: when LangGraph drops `__interrupt__` channel, the
+    `approval_status='pending' + writeback_status=None` shape still flags."""
+    assert _is_interrupted(
+        {"approval_status": "pending", "writeback_status": None}
+    ) is True
+
+
+def test_is_interrupted_false_when_writeback_ran() -> None:
+    """Resumed run: writeback_node populated writeback_status → not interrupted."""
+    assert _is_interrupted(
+        {"approval_status": "approved", "writeback_status": "succeeded"}
+    ) is False
+
+
+def test_is_interrupted_false_on_auto_approve() -> None:
+    """Auto-approve path completes without interrupt + writeback runs."""
+    assert _is_interrupted(
+        {"approval_status": "auto", "writeback_status": "succeeded"}
+    ) is False
+
+
+def test_is_interrupted_false_on_pending_with_writeback_set() -> None:
+    """Pathological state: pending but writeback ran (shouldn't normally happen,
+    but the second signal must not false-positive)."""
+    assert _is_interrupted(
+        {"approval_status": "pending", "writeback_status": "succeeded"}
+    ) is False

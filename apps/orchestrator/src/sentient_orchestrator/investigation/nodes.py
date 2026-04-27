@@ -26,16 +26,27 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langgraph.types import interrupt
+from sqlalchemy import text
 
 from sentient_common.db import tenant_session
 from sentient_common.logging import get_logger
 from sentient_orchestrator.investigation import audit
+from sentient_orchestrator.investigation.detection_rules import (
+    effective_severity,
+    evaluate_rules,
+    load_enabled_rules_for_tenant,
+)
+from sentient_orchestrator.investigation.hitl_policy import (
+    evaluate_policy,
+    select_active_policy,
+)
 from sentient_orchestrator.investigation.prompt import (
     build_initial_user_message,
     build_review_system_prompt,
@@ -54,6 +65,7 @@ from sentient_orchestrator.llm.exceptions import (
     FallbackChainExhausted,
 )
 from sentient_orchestrator.llm.router import LLMResult, LLMRouter
+from sentient_orchestrator.triage.schemas import Severity
 
 log = get_logger(__name__)
 
@@ -66,6 +78,9 @@ node_call_counts: dict[str, int] = {
     "correlate": 0,
     "draft_verdict": 0,
     "review": 0,
+    "apply_detection_rules": 0,
+    "await_approval": 0,
+    "writeback": 0,
 }
 
 #: Env var that triggers a synthetic failure inside a named node. Used by
@@ -588,6 +603,425 @@ async def review_node(state: InvestigationState, config: RunnableConfig) -> dict
         }
 
 
+# ----------------------------------------------------------- wk-8 nodes
+
+
+def _build_decision_ctx(
+    draft: dict[str, Any],
+    review: dict[str, Any] | None,
+    matches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the field map consumed by HITL policy evaluation."""
+    return {
+        "severity": draft.get("severity"),
+        "verdict": draft.get("verdict"),
+        "confidence": int(draft.get("confidence") or 0),
+        "mitre_techniques": list(draft.get("mitre_techniques") or []),
+        "detection_rule_matches": [m.get("rule_name") for m in matches],
+        "review_status": (review or {}).get("status"),
+        "review_hallucination_risk": (review or {}).get("hallucination_risk"),
+    }
+
+
+async def apply_detection_rules_node(
+    state: InvestigationState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Wk-8. Deterministic post-pass over the agent's draft verdict.
+
+    Loads enabled detection rules visible to the tenant (own + global),
+    matches against `draft_verdict.mitre_techniques`, computes
+    `effective_severity = max(agent, *rule_overrides)`, and writes the
+    matches back to state for the manifest + HITL policy + writeback comment.
+
+    Mutates `draft_verdict.severity` only when a matching rule's override is
+    higher than the agent's draft.
+    """
+    node_call_counts["apply_detection_rules"] += 1
+    _maybe_inject_failure("apply_detection_rules")
+
+    tenant_id, investigation_id = _ids_from_config(config)
+    draft = state.get("draft_verdict") or {}
+    techniques = list(draft.get("mitre_techniques") or [])
+    agent_sev: Severity = cast(Severity, draft.get("severity") or "info")
+
+    with tenant_session(tenant_id) as conn:
+        rules = load_enabled_rules_for_tenant(conn, tenant_id)
+        matches = evaluate_rules(rules, mitre_techniques=techniques)
+        new_sev = effective_severity(agent_sev, matches)
+        audit.emit_detection_rules_evaluated(
+            conn,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            evaluated_count=len(rules),
+            matched_count=len(matches),
+            matched_rules=[m.rule_name for m in matches],
+            agent_severity=agent_sev,
+            effective_severity=new_sev,
+            severity_overridden=(new_sev != agent_sev),
+        )
+
+    matches_dict = [
+        {
+            "rule_id": m.rule_id,
+            "rule_name": m.rule_name,
+            "matched_required": list(m.matched_required),
+            "matched_any": list(m.matched_any),
+            "severity_override": m.severity_override,
+        }
+        for m in matches
+    ]
+    return {
+        "draft_verdict": {**draft, "severity": new_sev},
+        "detection_rule_matches": matches_dict,
+    }
+
+
+async def await_approval_node(
+    state: InvestigationState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Wk-8. HITL gate. Either auto-approves or fires `interrupt()`.
+
+    The active HITL policy decides. `{"op":"always_true"}` (the MVP default
+    per ADR-0009) means every Tier-2 escalation goes through human approval.
+    Tenant-specific lower-priority rules can opt out of approval for narrow
+    conditions.
+
+    If interrupted, the resumer (CLI hack for wk-8; web UI in wk-9) must
+    `Command(resume={"approved": bool, "analyst_id": str | None,
+    "notes": str})`. Resume payload is treated as untrusted ingress and
+    coerced defensively before persistence.
+    """
+    node_call_counts["await_approval"] += 1
+    _maybe_inject_failure("await_approval")
+
+    tenant_id, investigation_id = _ids_from_config(config)
+    incident_id = UUID(state["incident_id"])
+    draft = state.get("draft_verdict") or {}
+    review = state.get("review_output")
+    matches = state.get("detection_rule_matches") or []
+    ctx = _build_decision_ctx(draft, review, matches)
+
+    with tenant_session(tenant_id) as conn:
+        policy_id, policy_name, expression = select_active_policy(conn, tenant_id)
+        needs_human = evaluate_policy(expression, ctx)
+
+    if not needs_human:
+        with tenant_session(tenant_id) as conn:
+            audit.emit_approval_received(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                approver_id=None,
+                approved=True,
+                notes="auto_approved",
+                policy_id=policy_id,
+                policy_name=policy_name,
+            )
+        return {
+            "approval_status": "auto",
+            "approver_id": None,
+            "approval_notes": "auto_approved",
+        }
+
+    # Human approval required. Flip incident status BEFORE interrupt so the
+    # checkpoint captures post-flip state. UPDATE is idempotent on resume
+    # (no-op if already 'awaiting_approval').
+    with tenant_session(tenant_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE incidents SET status = 'awaiting_approval' WHERE id = :id"
+            ),
+            {"id": str(incident_id)},
+        )
+        conn.execute(
+            text(
+                "UPDATE investigations SET approval_status = 'pending' WHERE id = :id"
+            ),
+            {"id": str(investigation_id)},
+        )
+        audit.emit_awaiting_approval(
+            conn,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            policy_id=policy_id,
+            policy_name=policy_name,
+            decision_ctx=ctx,
+        )
+
+    resume_payload = interrupt(
+        {
+            "reason": "human_approval_required",
+            "policy_name": policy_name,
+            "policy_id": str(policy_id) if policy_id else None,
+            "draft_verdict": draft,
+            "review": review,
+            "detection_rule_matches": matches,
+        }
+    )
+
+    if not isinstance(resume_payload, dict):
+        resume_payload = {}
+    approved = bool(resume_payload.get("approved"))
+    approver_id_raw = resume_payload.get("analyst_id")
+    approver_id = str(approver_id_raw) if approver_id_raw else None
+    notes_raw = resume_payload.get("notes") or ""
+    notes = sanitize_untrusted(str(notes_raw))[:1024]
+
+    with tenant_session(tenant_id) as conn:
+        audit.emit_approval_received(
+            conn,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            approver_id=approver_id,
+            approved=approved,
+            notes=notes,
+            policy_id=policy_id,
+            policy_name=policy_name,
+        )
+
+    return {
+        "approval_status": "approved" if approved else "rejected",
+        "approver_id": approver_id,
+        "approval_notes": notes,
+    }
+
+
+def _build_writeback_comment(
+    draft: dict[str, Any], investigation_id: UUID, evidence_url: str | None
+) -> str:
+    techniques = ",".join(list(draft.get("mitre_techniques") or [])[:8]) or "none"
+    summary = (draft.get("summary") or "").strip()[:500]
+    evidence_part = evidence_url or "pending"
+    return (
+        f"Sentient Layer verdict: {draft.get('verdict')} "
+        f"(confidence {int(draft.get('confidence') or 0)}%). "
+        f"MITRE: {techniques}. Summary: {summary} "
+        f"Evidence: {evidence_part}. inv_id={investigation_id.hex[:12]}"
+    )
+
+
+def _build_writeback_event(
+    finding: Any, draft: dict[str, Any], investigation_id: UUID
+) -> dict[str, Any]:
+    """Render the OCSF Detection Finding HEC event payload.
+
+    Uses `finding.to_hec_dict()` for the OCSF-namespaced base, then overlays
+    Sentient verdict fields (already namespaced in `to_hec_dict()` via wk-2's
+    `to_hec_dict` method, but we re-emit current draft values in case the
+    review/detection-rules pass mutated severity).
+    """
+    base = finding.to_hec_dict() if hasattr(finding, "to_hec_dict") else dict(finding)
+    base["sentient_verdict"] = draft.get("verdict")
+    base["sentient_confidence"] = int(draft.get("confidence") or 0)
+    base["sentient_severity"] = draft.get("severity")
+    base["sentient_summary"] = (draft.get("summary") or "")[:1024]
+    base["sentient_mitre_techniques"] = list(draft.get("mitre_techniques") or [])
+    base["sentient_investigation_id"] = str(investigation_id)
+    return base
+
+
+def _load_writeback_mode(conn: Any, tenant_id: UUID) -> str:
+    row = conn.execute(
+        text("SELECT writeback_mode FROM tenants WHERE id = :id"),
+        {"id": str(tenant_id)},
+    ).first()
+    if row is None or not row[0]:
+        return "hec_only"
+    return str(row[0])
+
+
+def _load_siem_notable_id(conn: Any, incident_id: UUID) -> str | None:
+    row = conn.execute(
+        text("SELECT siem_notable_id FROM incidents WHERE id = :id"),
+        {"id": str(incident_id)},
+    ).first()
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
+
+
+async def _invoke_writeback_tool(
+    tool: BaseTool, payload: dict[str, Any]
+) -> tuple[bool, dict[str, Any]]:
+    """Wrap a writeback MCP tool call. Catches every exception → (False, detail).
+
+    Best-effort: writeback_node treats all failures as non-fatal so the verdict
+    stays committed. The detail dict is sanitized + capped at the audit emit.
+
+    Soft-failure detection: a tool may return `success=false` / `degraded=true`
+    structurally without raising (e.g. siem_notable_update on plain Splunk
+    returns `degraded=true`). Parse the JSON response and inspect the fields
+    rather than substring-matching — Pydantic v2's compact JSON shape
+    (`"success":false`, no space) breaks naïve substring checks.
+    """
+    try:
+        result = await tool.ainvoke(payload)
+        text_payload = extract_tool_text(result)
+        soft_failed = False
+        try:
+            parsed = json.loads(text_payload)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            if parsed.get("success") is False:
+                soft_failed = True
+            if parsed.get("degraded") is True:
+                soft_failed = True
+        return (not soft_failed, {"response": text_payload[:500]})
+    except Exception as exc:  # noqa: BLE001 — best-effort writeback
+        return (
+            False,
+            {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:500],
+            },
+        )
+
+
+async def writeback_node(
+    state: InvestigationState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Wk-8. Push the verdict back to Splunk.
+
+    Always: HEC POST to `triage_verdicts` index (works on plain Splunk).
+    Conditional: when tenant.writeback_mode='dual' AND we have the upstream
+    notable id, also call `siem_notable_update` to pin the verdict comment to
+    the original ES notable.
+
+    Best-effort failure: a HEC or notable_update error does NOT roll back the
+    verdict (already committed by `_finalize_done` after this returns).
+    `writeback_status='failed'` is recorded on the investigation row instead.
+
+    Skipped path: when the analyst rejected the writeback
+    (`approval_status='rejected'`), the verdict stays committed but neither
+    Splunk surface is touched.
+    """
+    node_call_counts["writeback"] += 1
+    _maybe_inject_failure("writeback")
+
+    tenant_id, investigation_id = _ids_from_config(config)
+    incident_id = UUID(state["incident_id"])
+    configurable = config.get("configurable") or {}
+    tools: list[BaseTool] = configurable["tools"]
+    finding = configurable["finding"]
+    draft = state.get("draft_verdict") or {}
+
+    if state.get("approval_status") == "rejected":
+        with tenant_session(tenant_id) as conn:
+            audit.emit_writeback_attempted(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                mode="skipped_rejected",
+                hec_index=None,
+                notable_update_target=None,
+            )
+        return {"writeback_status": "skipped", "writeback_attempts": []}
+
+    with tenant_session(tenant_id) as conn:
+        wb_mode = _load_writeback_mode(conn, tenant_id)
+        siem_notable_id = _load_siem_notable_id(conn, incident_id)
+
+    event = _build_writeback_event(finding, draft, investigation_id)
+
+    with tenant_session(tenant_id) as conn:
+        audit.emit_writeback_attempted(
+            conn,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            mode=wb_mode,
+            hec_index="triage_verdicts",
+            notable_update_target=(siem_notable_id if wb_mode == "dual" else None),
+        )
+
+    attempts: list[dict[str, Any]] = []
+
+    try:
+        hec_tool = find_tool(tools, "siem_hec_post")
+    except LookupError as exc:
+        miss_attempt = {
+            "tool": "siem_hec_post",
+            "ok": False,
+            "detail": {"error_message": str(exc)},
+        }
+        with tenant_session(tenant_id) as conn:
+            audit.emit_writeback_failed(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                mode=wb_mode,
+                attempts=[miss_attempt],
+                error="hec_tool_unavailable",
+            )
+        return {
+            "writeback_status": "failed",
+            "writeback_attempts": [miss_attempt],
+        }
+
+    hec_ok, hec_detail = await _invoke_writeback_tool(
+        hec_tool, {"event": event, "index": "triage_verdicts"}
+    )
+    attempts.append({"tool": "siem_hec_post", "ok": hec_ok, "detail": hec_detail})
+
+    nu_ok = True
+    if wb_mode == "dual" and siem_notable_id:
+        try:
+            nu_tool = find_tool(tools, "siem_notable_update")
+        except LookupError as exc:
+            attempts.append(
+                {
+                    "tool": "siem_notable_update",
+                    "ok": False,
+                    "detail": {"error_message": str(exc)},
+                }
+            )
+            nu_ok = False
+        else:
+            evidence_url_raw = state.get("evidence_s3_key")
+            evidence_url = (
+                str(evidence_url_raw) if evidence_url_raw else None
+            )
+            comment = _build_writeback_comment(
+                draft, investigation_id, evidence_url=evidence_url
+            )
+            nu_ok, nu_detail = await _invoke_writeback_tool(
+                nu_tool,
+                {
+                    "notable_id": siem_notable_id,
+                    "comment": comment,
+                    "status": "in_progress",
+                },
+            )
+            attempts.append(
+                {"tool": "siem_notable_update", "ok": nu_ok, "detail": nu_detail}
+            )
+
+    overall_ok = hec_ok and nu_ok
+    with tenant_session(tenant_id) as conn:
+        if overall_ok:
+            audit.emit_writeback_succeeded(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                mode=wb_mode,
+                attempts=attempts,
+            )
+        else:
+            audit.emit_writeback_failed(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                mode=wb_mode,
+                attempts=attempts,
+                error=("hec_failed" if not hec_ok else "notable_update_failed"),
+            )
+
+    return {
+        "writeback_status": "succeeded" if overall_ok else "failed",
+        "writeback_attempts": attempts,
+    }
+
+
 # ------------------------------------------------------------- routing
 
 
@@ -608,6 +1042,8 @@ def route_after_agent(state: InvestigationState) -> str:
 __all__ = [
     "INVESTIGATION_INJECT_FAILURE_ENV",
     "agent_node",
+    "apply_detection_rules_node",
+    "await_approval_node",
     "correlate_node",
     "draft_verdict_node",
     "extract_tool_text",
@@ -619,4 +1055,5 @@ __all__ = [
     "route_after_agent",
     "tools_node",
     "tools_to_openai_schema",
+    "writeback_node",
 ]

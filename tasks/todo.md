@@ -544,13 +544,30 @@ _Wk-7 founder live-gates pending — same flow as wk-6:_
 - [ ] **Crash-resume gate** — run `pytest -m integration apps/orchestrator/tests/test_investigation_smoke.py` against the box (real DB + OpenRouter; mocks MCP). Resume should land on the new `review` node (or a later one) but never re-fire `plan`.
 
 **Wk 8 — Detection rules + HITL + dual writeback**
-- [ ] `apply_detection_rules` graph node; seed 10 rules.
-- [ ] `hitl_policies` evaluator (~50 line JSONB tree walker). Default policy `{"op": "always_true"}`.
-- [ ] `await_approval` node using LangGraph `interrupt()`. State persists in checkpointer; resume on analyst click.
-- [ ] `siem_notable_update` MCP tool — `service.post('notable_update', ...)` via SDK low-level.
-- [ ] `siem_hec_post` MCP tool — `httpx` POST to `/services/collector/event` → `triage_verdicts` index.
-- [ ] Verify both in Splunk: original notable gets comment + new event in triage_verdicts.
-- [ ] **Continue labeling (~2-3 hrs, target ~10 more incidents).**
+
+_File-side complete 2026-04-27; founder live-gate (real Splunk + OpenRouter on the box) pending. Plan: `/Users/kaya/.claude/plans/plan-next-phase-reactive-pascal.md`._
+
+- [x] `apply_detection_rules` graph node; seed 10 rules. Engine at `apps/orchestrator/src/sentient_orchestrator/investigation/detection_rules.py` (DetectionRule + RuleMatch + evaluate_rules + effective_severity + load_enabled_rules_for_tenant). Seed at `db/seeds/seed_detection_rules.py` (idempotent UPSERT against partial unique index). Node `apply_detection_rules_node` in `nodes.py`; mutates `draft_verdict.severity` only when a rule's override is higher.
+- [x] `hitl_policies` evaluator (~50 line JSONB tree walker). Default policy `{"op": "always_true"}`. Module `apps/orchestrator/src/sentient_orchestrator/investigation/hitl_policy.py` — 12 operators (`and`/`or`/`not`/`always_true`/`always_false`/`eq`/`gt`/`lt`/`gte`/`lte`/`in`/`contains`), max-depth guard (16), missing-key short-circuit to False (no raise). Default seed at `db/seeds/seed_hitl_policies.py` (global `default_require_approval` priority 1000).
+- [x] `await_approval` node using LangGraph `interrupt()`. State persists in checkpointer; resume on analyst click. `await_approval_node` in `nodes.py` — flips `incidents.status='awaiting_approval'` + `investigations.approval_status='pending'` BEFORE `interrupt()` (idempotent SQL UPDATE on resume re-fire), defensively coerces resume payload (bool/UUID/sanitized notes ≤1024 char). CLI hack at `apps/orchestrator/src/sentient_orchestrator/cli_resume.py` for wk-8 testing (wk-9 web UI replaces).
+- [x] `siem_notable_update` MCP tool — `service.post('notable_update', ...)` via SDK low-level. ES-only with `degraded=true` on plain Splunk (re-uses wk-2 `_has_notable_index` cache from `siem_get_notable`). Schema at `mcp/splunk/src/sentient_mcp_splunk/schemas/siem_notable_update.py`; tool at `tools/siem_notable_update.py`. 5 error mappings + 9 unit tests.
+- [x] `siem_hec_post` MCP tool — `httpx` POST to `/services/collector/event` → `triage_verdicts` index. Async httpx client (NOT splunk-sdk), reads `SPLUNK_HEC_HOST/PORT/TOKEN` + `SPLUNK_VERIFY_TLS` from settings. 8 unit tests + 1 integration (skipped on placeholder env). Schema at `schemas/siem_hec_post.py`; tool at `tools/siem_hec_post.py`. Both tools registered in `server.py`.
+- [x] Writeback node `writeback_node` in `nodes.py`. Always HEC; conditional `notable_update` when `tenants.writeback_mode='dual'` AND `incidents.siem_notable_id` non-NULL. Best-effort: never raises, never rolls back the verdict; failure → `writeback_status='failed'` + `writeback_failed` audit. Skipped path on `approval_status='rejected'`. 8 unit tests.
+- [x] Migration `d3a9f2c1e7b4_wk8_writeback_approval` — 6 cols on `investigations` (writeback_status, writeback_attempts, approval_status, approver_id, approval_notes, detection_rule_matches) + 4 partial unique indexes on detection_rules + hitl_policies (per-tenant + global namespaces).
+- [x] Graph + runner wiring. `graph.py` adds `review → apply_detection_rules → await_approval → writeback → END`. `runner.py` adds `_is_interrupted` (defends both `__interrupt__` channel AND `approval_status='pending'`); extracts `_finalize_after_graph` so cli_resume calls the same finalize path. `_update_investigation_wk8_surface` writes the 6 new cols + populates `human_approved_by/at` when approver_id is a real UUID.
+- [x] `evidence.py` carry-forward fix — `rule_matches: []` placeholder now reads `final_state["detection_rule_matches"]`. Manifest schema unchanged (additive).
+- [x] 6 new audit emitters in `audit.py` (detection_rules_evaluated, awaiting_approval, approval_received, writeback_attempted, writeback_succeeded, writeback_failed). All sanitized + 1KB-capped.
+- [ ] Verify both in Splunk: original notable gets comment + new event in triage_verdicts. _Founder live-gate workstream._
+- [ ] **Continue labeling (~2-3 hrs, target ~10 more incidents).** _Founder workstream, parallel._
+
+_Wk-8 founder live-gates pending — same flow as wk-6/7:_
+
+- [ ] **Day 5 unified e2e gate** — drop a medium+ severity notable; assert `incidents.status='awaiting_approval'` + `investigations.approval_status='pending'` after triage + investigation. Audit chain ends with `awaiting_approval`. LangSmith trace shows `apply_detection_rules` + `await_approval` spans.
+- [ ] **Auto-approve gate** — set the global default policy to `{"op":"always_false"}` via SQL; re-drop. Assert `approval_received` audit with `approved=true notes=auto_approved`. Reset to `always_true` after.
+- [ ] **CLI resume** — `uv run python -m sentient_orchestrator.cli_resume --investigation-id <id> --approve --analyst-id <uuid> --notes "looks good"`. Assert `incidents.status='done'`, `investigations.{verdict, writeback_status='succeeded'}`. Audit extends with `approval_received → writeback_attempted → writeback_succeeded → investigation_complete`.
+- [ ] **Splunk verification** — HEC: `index=triage_verdicts | head 5` shows OCSF event with `sentient_verdict` populated. `notable_update` (`writeback_mode='dual'` only): original notable gets the verdict comment + status flipped to `in_progress`. On `hec_only` tenant audit shows only one `siem_hec_post` attempt.
+- [ ] **Cap test (wk-7 regression)** — set `tenants.per_investigation_budget_usd=0.0001`; drop notable; assert `verdict='inconclusive'` + `inconclusive_reason='budget_cap_exceeded'` + `budget_exceeded` audit row, NOT `awaiting_approval`. Reset cap.
+- [ ] **Crash-resume gate** — `pytest -m integration apps/orchestrator/tests/test_investigation_smoke.py` against the box; both tests still green after wk-8 graph extension.
 
 **Wk 9 — Web UI core (dev-bypass auth)**
 - [ ] Next.js 15 app with dev-bypass middleware (no Entra yet).
@@ -615,6 +632,63 @@ _Wk-7 founder live-gates pending — same flow as wk-6:_
 ---
 
 ## Review Section (fill in after each week)
+
+### Wk 8 Review
+
+**Session 1 (2026-04-27) — file-side complete; founder live-gate pending.**
+
+Landed (committed `9967c16` for wk-7 first; wk-8 changes uncommitted at end of session; 488 tests passing, ruff + mypy --strict clean across 78 source files):
+
+**Migration `d3a9f2c1e7b4_wk8_writeback_approval`** — 6 cols on `investigations` (writeback_status CHECK IN ['pending','succeeded','failed','skipped'], writeback_attempts JSONB DEFAULT '[]', approval_status CHECK IN ['pending','approved','rejected','auto'], approver_id UUID, approval_notes TEXT, detection_rule_matches JSONB) + 4 partial unique indexes split per-tenant + global namespaces on detection_rules + hitl_policies. Verified live: `alembic upgrade head` clean; `\d investigations` shows all 6 cols + check constraints + writeback_attempts default.
+
+**Detection rules engine** (`apps/orchestrator/src/sentient_orchestrator/investigation/detection_rules.py`) — `DetectionRule` + `RuleMatch` dataclasses (frozen). `evaluate_rules(rules, *, mitre_techniques)` matches on `required_techniques` (AND) + optional `any_techniques` (OR). `effective_severity(agent, matches)` is max-rank (never lowers). `load_enabled_rules_for_tenant(conn, tenant_id)` SELECTs `WHERE enabled AND (tenant_id = :tid OR tenant_id IS NULL)` (own + global). 14 unit tests + 1 integration (skipped on non-seeded DB).
+
+**10 seeded global rules** (`db/seeds/seed_detection_rules.py`) — verified against `mitre_techniques` (691 rows). `ransomware_kill_chain` (T1059.001+T1486 / T1071…) → critical, `credential_dumping_then_lateral` (T1003+T1021 / T1021.001…) → critical, `interactive_privilege_escalation` (T1078+T1068) → high, `defense_evasion_clearlogs` (T1070.001 / T1059.001…) → high, `cloud_iam_persistence` (T1098.003 / T1078.004) → high, `data_exfil_over_c2` (T1041 / T1071…) → critical, `phishing_with_macro` (T1566.001+T1204.002 / T1059.005) → high, `living_off_the_land_proxy_chain` (T1218.011 / T1059.001…) → medium, `webshell_persistence` (T1505.003 / T1190) → high, `valid_accounts_only` (T1078) → low (floor only — never escalates).
+
+**HITL policy evaluator** (`apps/orchestrator/src/sentient_orchestrator/investigation/hitl_policy.py`) — pure-Python, no `eval`/`exec`, allowlisted operators only. 12 ops (`and`/`or`/`not`/`always_true`/`always_false`/`eq`/`gt`/`lt`/`gte`/`lte`/`in`/`contains`). Max-depth 16 (raises ValueError beyond). Missing-key short-circuit to False (never raises on probe of optional ctx field). Boolean operands rejected for numeric compare (caught → False). `select_active_policy(conn, tid)` returns highest-priority enabled policy (tenant wins over global at same priority via NULLS LAST); fallback default = `{"op": "always_true"}`. 13 unit tests.
+
+**Default global HITL policy** (`db/seeds/seed_hitl_policies.py`) — `default_require_approval`, expression `{"op":"always_true"}`, priority 1000. Per ADR-0009: MVP = 100% human approval; tenant-specific lower-priority rules can opt out for narrow conditions.
+
+**Three new graph nodes** (`investigation/nodes.py`):
+- `apply_detection_rules_node` — loads enabled rules, evaluates matches, mutates `draft_verdict.severity` only when override is higher, emits `detection_rules_evaluated` audit. Returns `{"draft_verdict": {**draft, "severity": new_sev}, "detection_rule_matches": [...]}`.
+- `await_approval_node` — `select_active_policy` + `evaluate_policy(ctx)`. Auto-path returns `approval_status='auto'`. Human-required path: SQL UPDATE flips `incidents.status='awaiting_approval'` + `investigations.approval_status='pending'` BEFORE `interrupt(...)` (idempotent on resume re-fire). Resume payload defensively coerced (`bool()`/UUID-str/sanitize+1024-cap).
+- `writeback_node` — reads `tenants.writeback_mode` + `incidents.siem_notable_id` per-call (no caching — admin can flip mode mid-investigation). Always HEC; conditional `siem_notable_update` when `dual` AND `siem_notable_id` non-NULL. `_invoke_writeback_tool` catches every exception → `(False, detail)`. Best-effort: never raises, never rolls back. Skipped path on `approval_status='rejected'`. 8 unit tests.
+
+**CLI resume** (`apps/orchestrator/src/sentient_orchestrator/cli_resume.py`) — argparse `--investigation-id`, mutually exclusive `--approve`/`--reject`, `--analyst-id`, `--notes`. Reads `langgraph_thread_id` off DB (bypasses RLS via raw psycopg — dev hack only; wk-9 web UI authenticates), opens `AsyncPostgresSaver`, `await graph.ainvoke(Command(resume={...}), config)`. Exit codes 0/2.
+
+**Two new MCP tools**:
+- `siem_notable_update` — schema (notable_id pattern reused from siem_get_notable; comment 1-4096; status enum; urgency enum). Tool: `service.post('notable_update', ...)` via splunk-sdk low-level, wrapped in `asyncio.to_thread` + `wait_for(timeout=15)`. Re-uses `_has_notable_index` cache from wk-2 (exported helper). Error chain: `except SiemToolError: raise` first, then auth/timeout/4xx/5xx/internal. ES-only with `degraded=true` on plain Splunk.
+- `siem_hec_post` — schema (event dict required + non-empty validator; sourcetype default `sentient:detection_finding`; index default `triage_verdicts`). Tool: `httpx.AsyncClient` POST to `:8088/services/collector/event` with `Authorization: Splunk <token>`. `splunk_verify_tls` pass-through (founder's box uses self-signed). Error mappings: 401→auth_failure, ≥400→splunk_4xx/5xx, TimeoutException→search_timeout, HTTPError→internal, missing config→internal.
+
+**6 new audit emitters** (`investigation/audit.py`) — `emit_detection_rules_evaluated`, `emit_awaiting_approval`, `emit_approval_received`, `emit_writeback_attempted`, `emit_writeback_succeeded`, `emit_writeback_failed`. All wrap `walk_and_sanitize` + 1KB cap. 6 new unit tests.
+
+**Graph wiring** (`investigation/graph.py`) — full topology now: `START → plan → agent ⇄ tools (cap=10) → correlate → draft_verdict → review → apply_detection_rules → await_approval → writeback → END`. 9 nodes total. Node count test + edge presence test extended.
+
+**Runner finalization** (`investigation/runner.py`) — `_is_interrupted(final_state)` checks both `__interrupt__` channel marker AND `approval_status='pending'` w/o writeback_status (defence-in-depth across LangGraph minor versions). Extracted `_finalize_after_graph` so `cli_resume.py` shares the persistence path. `_update_investigation_wk8_surface` writes 6 new cols + populates `human_approved_by/at` when approver_id is a real users.id UUID. `_finalize_done` extended with 6 wk-8 kwargs (all optional / default-NULL).
+
+**State** (`investigation/state.py`) — 6 new TypedDict fields (detection_rule_matches, approval_status, approver_id, approval_notes, writeback_status, writeback_attempts). `node_call_counts` adds `apply_detection_rules`/`await_approval`/`writeback`.
+
+**Wk-7 carry-forward** — `evidence.py:194-195`: `rule_matches: []` placeholder now reads `final_state["detection_rule_matches"]`. Manifest schema unchanged (additive).
+
+**MCP server registration** (`mcp/splunk/src/sentient_mcp_splunk/server.py`) — both wk-8 tools registered. Tool surface now `{siem_query, siem_get_notable, siem_notable_update, siem_hec_post}`. Wk-2 `test_tool_count_matches_wk2_scope` renamed + bumped to wk-8 expected set; 2 new tool-registration tests (input schema asserts).
+
+Verified end-to-end (this session, no live integrations needed):
+
+- `uv run alembic upgrade head` — wk-7 + wk-8 migrations clean; `\d investigations` shows full surface.
+- `uv run python db/seeds/seed_detection_rules.py` → 10 global rules upserted.
+- `uv run python db/seeds/seed_hitl_policies.py` → default policy upserted.
+- `uv run ruff check apps libs mcp` — clean.
+- `uv run mypy apps libs mcp` — 71 source files, no issues.
+- `uv run pytest -q` — **488 passed**, 2 skipped (verify smoke), 6 deselected (3 wk-2 + 2 wk-6 integration markers + 1 new wk-8 detection_rules integration marker).
+
+**Architectural decisions surfaced:**
+- (new) `_has_notable_index` cache is process-global, NOT per-tenant. Acceptable for wk-8 single-tenant founder box. Per-tenant lands wk-12 with `splunk_client.py` per-tenant refactor (BOUNDARY: do not refactor before).
+- (new) `_load_writeback_mode` reads inside `writeback_node` itself (no caching) so an admin flip lands in-flight. Few-second latency acceptable single-tenant; multi-tenant may want a cache with TTL wk-12.
+- (carry-forward) `awaiting_approval` rows orphaned forever if analyst never clicks. Wk-12 reaper auto-rejects after 7 days.
+- (carry-forward) CLI resume is a developer-only hack — no auth, no audit beyond what the node emits. Wk-9 web UI replaces.
+- (new) `_invoke_writeback_tool` parses tool response text for `"success": false` / `"degraded": true` to surface soft failures as audit attempts even when the call didn't raise. Heuristic; may need to unmarshal JSON proper if false-positives surface.
+
+Carry-over to wk-9: web UI investigation detail page (verdict + reasoning trace from manifest + evidence chain + MITRE matrix + review notes), approval button (POST → resume payload into LangGraph thread, replacing CLI hack), audit-log explorer, time-travel replay. The `cli_resume.py` is the contract spec for the wk-9 approval-route handler.
 
 ### Wk 6 Review
 
