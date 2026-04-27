@@ -33,6 +33,7 @@ from sentient_ocsf.detection_finding import (
     DetectionFinding,
     validate_detection_finding,
 )
+from sentient_orchestrator.investigation import run_tier2_investigation
 from sentient_orchestrator.llm.exceptions import FallbackChainExhausted
 from sentient_orchestrator.llm.router import LLMRouter
 from sentient_orchestrator.mitre_lookup import fetch_technique_descriptions
@@ -43,9 +44,15 @@ log = get_logger(__name__)
 
 
 async def run_investigation(job: IngestJob) -> UUID:
-    """Run Tier-1 triage; return the new investigations.id."""
+    """Run Tier-1 triage and (on escalation) Tier-2 investigation.
+
+    Returns the `investigations.id` for the row created by triage. When triage
+    escalates, Tier-2 runs in-process after the triage txn commits — the
+    investigation state continues advancing without a second worker dispatch.
+    """
     investigation_id = uuid4()
     now = datetime.now(UTC)
+    was_escalated = False
 
     with tenant_session(job.tenant_id) as conn:
         finding = _load_finding(conn, job.incident_id)
@@ -161,6 +168,7 @@ async def run_investigation(job: IngestJob) -> UUID:
                 triage=triage,
                 completed_at=completed_at,
             )
+            was_escalated = True
             log.info(
                 "triage escalated to tier-2",
                 investigation_id=str(investigation_id),
@@ -168,6 +176,17 @@ async def run_investigation(job: IngestJob) -> UUID:
                 severity=triage.severity,
                 confidence=triage.confidence,
             )
+
+    # Tier-2 runs OUTSIDE the triage txn so the escalation row + audit are
+    # already durable when the long-running graph starts. Crash mid-graph
+    # leaves the row in `triaging`/`investigating` for the wk-12 reaper to
+    # pick up — same-process resume covered by the smoke test.
+    if was_escalated:
+        await run_tier2_investigation(
+            investigation_id=investigation_id,
+            tenant_id=job.tenant_id,
+            incident_id=job.incident_id,
+        )
 
     return investigation_id
 

@@ -1,0 +1,37 @@
+"""Tier-2 investigation graph topology tests."""
+
+from __future__ import annotations
+
+from langgraph.graph import END, START
+from langgraph.graph.state import CompiledStateGraph
+
+from sentient_orchestrator.investigation.graph import build_investigation_graph
+
+
+def test_builder_registers_all_nodes() -> None:
+    builder = build_investigation_graph()
+    expected = {"plan", "agent", "tools", "correlate", "draft_verdict"}
+    assert expected.issubset(builder.nodes.keys())
+
+
+def test_compiles_without_checkpointer() -> None:
+    """Graph must compile in-memory for unit-level inspection."""
+    graph = build_investigation_graph().compile()
+    assert isinstance(graph, CompiledStateGraph)
+
+
+def test_static_edges_present() -> None:
+    builder = build_investigation_graph()
+    edges = {(src, dst) for src, dst in builder.edges}
+    assert (START, "plan") in edges
+    assert ("plan", "agent") in edges
+    assert ("tools", "agent") in edges
+    assert ("correlate", "draft_verdict") in edges
+    assert ("draft_verdict", END) in edges
+
+
+def test_agent_has_conditional_routing() -> None:
+    """`agent` node must have a conditional edge (route_after_agent), not a static edge."""
+    builder = build_investigation_graph()
+    branches = builder.branches
+    assert "agent" in branches

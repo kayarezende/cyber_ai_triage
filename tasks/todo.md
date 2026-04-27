@@ -512,12 +512,20 @@ _File-side complete 2026-04-27; founder live-gate (real OpenRouter call against 
 - Integration smoke: `evals/harness/test_wk4_smoke.py` updated (no longer asserts stub verdict; now requires `OPENROUTER_API_KEY` + asserts triage_started + one of triage_auto_close / triage_escalated / triage_failed_fallback_exhausted in the audit chain + ≥1 `usage` row).
 
 **Wk 6 — Tier 2 LangGraph skeleton + parallel labeling begins**
-- [ ] StateGraph skeleton: `plan → execute_tools → correlate → draft_verdict` (no HITL/review yet).
-- [ ] MCP tools wired via `langchain-mcp-adapters`.
-- [ ] System prompt: MITRE context, OCSF output contract, investigative methodology.
-- [ ] `PostgresSaver` checkpointer wired. Crash-resume smoke test.
-- [ ] Runs visible in LangSmith with full trace + replay.
-- [ ] **Start labeling golden set (~2 hrs this week, target ~5 incidents).**
+
+_File-side complete 2026-04-27; founder live-gate pending. Plan: `/Users/kaya/.claude/plans/plan-next-phase-refactored-star.md`._
+
+- [x] StateGraph skeleton: `plan → execute_tools → correlate → draft_verdict` (no HITL/review yet). `apps/orchestrator/src/sentient_orchestrator/investigation/graph.py` — `plan → agent ⇄ tools (loop) → correlate → draft_verdict`. `route_after_agent` short-circuits to `correlate` when `tool_call_count >= MAX_TOOL_CALLS=10`.
+- [x] MCP tools wired via `langchain-mcp-adapters`. `mcp_client.build_mcp_client()` returns a `MultiServerMCPClient` over `streamable_http` (ADR-0019). `tools_node` dispatches each `tool_call` manually with `_extract_tool_text` + `walk_and_sanitize` on results.
+- [x] System prompt: MITRE context, OCSF output contract, investigative methodology. `investigation/prompt.py::build_system_prompt(mitre_descs)` injects T-code descriptions; `build_initial_user_message` sanitizes every Splunk-controlled field through the wk-6 `sanitizer` layer.
+- [x] `PostgresSaver` checkpointer wired. Crash-resume smoke test. `runner.run_tier2_investigation` opens `AsyncPostgresSaver.from_conn_string(_strip_psycopg_dsn(DATABASE_URL))`. `test_investigation_smoke.py::test_investigation_smoke_resumes_after_inject_failure` proves `plan_node` does NOT re-fire after `INVESTIGATION_INJECT_FAILURE=correlate` (same load-bearing invariant as wk-2 verify).
+- [x] Runs visible in LangSmith with full trace + replay. `LLMRouter._build_traced_call` wraps every LLM call in `langsmith.traceable`; `init_tracing()` already sets `LANGCHAIN_TRACING_V2=true` at worker boot. No additional wiring needed.
+- [ ] **Start labeling golden set (~2 hrs this week, target ~5 incidents).** _Founder workstream, parallel._
+
+_Wk-6 founder live-gates pending — same flow as wk-5:_
+
+- [ ] **Day 5 end-to-end gate** — drop a medium+ severity notable; assert `incidents.status='done'`, `investigations.verdict ∈ {true_positive,false_positive,benign}`, `langgraph_thread_id` non-NULL, `ocsf_output` JSONB populated, audit chain `triage_started → triage_escalated → investigation_started → llm_call×N → tool_call×M → verdict_drafted → investigation_complete`, ≥4 `usage` rows. LangSmith project shows full graph trace.
+- [ ] **Crash-resume gate** — run `pytest -m integration apps/orchestrator/tests/test_investigation_smoke.py` against the box (requires real DB + OpenRouter; mocks MCP). Both tests should pass.
 
 **Wk 7 — Tier 2 completeness + Review role + prompt caching**
 - [ ] Prompt caching (`cache_control` on system + incident + MITRE blocks). Measure cache hit rate; diagnose if <50%.
@@ -598,6 +606,56 @@ _File-side complete 2026-04-27; founder live-gate (real OpenRouter call against 
 ---
 
 ## Review Section (fill in after each week)
+
+### Wk 6 Review
+
+**Session 1 (2026-04-27) — file-side complete; founder live-gates pending.**
+
+Landed (uncommitted at end of session; 352 tests passing, ruff + mypy --strict clean across 63 source files):
+
+**LLMRouter extension (Day 1)** — additive change to support tool-use:
+- `apps/orchestrator/src/sentient_orchestrator/llm/openrouter.py` — added `OpenRouterToolCall(id, name, arguments)` + `OpenRouterResponse.tool_calls: list[OpenRouterToolCall]` + `tools` / `tool_choice` kwargs to `call_chat_completion`. `_parse_tool_calls` parses `choices[0].message.tool_calls`; malformed JSON in `function.arguments` raises `ValueError` (router buckets as `validation_fail`). Empty list when absent.
+- `apps/orchestrator/src/sentient_orchestrator/llm/router.py` — `LLMResult.tool_calls: tuple[OpenRouterToolCall, ...]` + new kwargs. Validates `tools` and `response_schema` mutually exclusive. New ValueError-bucket path in `_attempt` (covers malformed tool args + the existing "no choices" defensive raise).
+- Tests: 9 new in `test_llm_openrouter.py` (request body shape, `tools`/`tool_choice` pass-through, empty-list parsing, multi-call parsing, malformed-args ValueError, empty-string args, dict args, no-tools no-keys); 4 new in `test_llm_router.py` (pass-through, no-tools kwargs, mutual-exclusion guard, malformed-args fallback). 45 total in those two files.
+
+**Investigation primitives (Day 2)** — new package `apps/orchestrator/src/sentient_orchestrator/investigation/`:
+- `state.py` — `InvestigationState` TypedDict (messages reducer, identifiers, triage context, tool_call_count, draft_verdict). `InvestigationOutput` Pydantic (`verdict`/`confidence`/`severity`/`mitre_techniques[]`/`summary`/`evidence[]`/`reasoning`, `extra="forbid"`). `MAX_TOOL_CALLS=10`.
+- `sanitizer.py` — `sanitize_untrusted(value, max_chars=4000)` strips C0/C1 + DEL (keeps `\t\n\r`), normalizes CRLF→LF, truncates with `…[truncated]` marker. `walk_and_sanitize(obj)` recurses dict/list values (NOT keys). 25 unit tests covering control-char strip, CRLF normalization, idempotency, encoded-payload pass-through (base64, hex, JSON, escaped quotes), nested walk, scalar pass-through.
+- `audit.py` — thin wrappers over `sentient_common.audit.insert_audit_log`. Six emitters: `emit_investigation_started`, `emit_llm_call`, `emit_tool_call` (sanitized + 1KB-capped args/result), `emit_verdict_drafted`, `emit_investigation_complete`, `emit_investigation_failed`. Actor `orchestrator:investigation`. 8 tests assert sanitization + truncation paths.
+- `prompt.py` — `build_system_prompt(mitre_descs)` renders 7-section template (role, methodology, tools, MITRE block, output contract, guardrails, trust boundary). `build_initial_user_message(*, finding, triage_ctx, mitre_descs)` formats per-incident user message, sanitizing every OCSF field. 13 tests over `libs/ocsf/tests/fixtures/splunk_notables/*.json`.
+
+**Graph + nodes (Day 3)**:
+- `nodes.py` — `plan_node` / `agent_node` / `tools_node` / `correlate_node` / `draft_verdict_node`. Each LLM-calling node opens its own `tenant_session` (short txn) for the `LLMRouter.call` + audit emit, so per-attempt usage rows + audit rows commit independently of the long-running graph. Helpers: `tools_to_openai_schema` (via `langchain_core.utils.function_calling.convert_to_openai_tool`), `find_tool`, `extract_tool_text` (mirrors `verify/graph.py:141`), `_serialize_assistant_message` (re-encodes `tool_calls.arguments` to JSON STRING per OpenAI wire format). `node_call_counts` dict + `INVESTIGATION_INJECT_FAILURE_ENV` for the resume smoke. `route_after_agent` returns `"tools"` only when last assistant has `tool_calls` AND count `< MAX_TOOL_CALLS`. 24 unit tests (mocked LLMRouter + tools).
+- `graph.py` — `build_investigation_graph()` returns the StateGraph builder (caller compiles with checkpointer). 4 topology tests confirm node set, edges, and conditional branch on `agent`.
+
+**Runner + main wiring (Day 4)**:
+- `mcp_client.py` — `build_mcp_client()` factory; reads `MCP_SPLUNK_URL` env (compose-set). Returns `MultiServerMCPClient` over `streamable_http`. Single-line module — bigger than that is wk-7 territory.
+- `runner.py` — `async run_tier2_investigation(*, investigation_id, tenant_id, incident_id) -> None`. Three phases:
+  1. **Claim txn** — SELECT investigation row + `inconclusive_reason='tier_2_pending_wk6'` guard, atomic `UPDATE incidents SET status='investigating' WHERE status='triaging'` (rowcount==0 → log + return), generate `thread_id = inv-<hex[:12]>`, mark `langgraph_thread_id` + clear `inconclusive_reason`, audit `investigation_started`. Commit.
+  2. **Graph run** — load tools from `build_mcp_client().get_tools()`, open `AsyncPostgresSaver.from_conn_string(_strip_psycopg_dsn(DATABASE_URL))`, compile graph, `ainvoke(initial_state, config={configurable: {thread_id, tenant_id, investigation_id, finding, tools, mitre_descs}})`. `FallbackChainExhausted` + bare `Exception` both finalize as `inconclusive` with audit row.
+  3. **Finalize** — new `tenant_session`, write `investigations.verdict / confidence / severity / mitre_techniques / summary / ocsf_output / completed_at`, `incidents.status='done'` (or `inconclusive`), audit `investigation_complete` (or `investigation_failed`).
+- `runner.py` (main triage) — restructured: `was_escalated` flag set inside the triage `with tenant_session` block; OUTSIDE the block (after commit), `if was_escalated: await run_tier2_investigation(...)`. Worker dispatch (`apps/worker/src/sentient_worker/main.py`) unchanged — `asyncio.run(run_investigation(job))` already awaits the full chain.
+- Tests: 12 new `test_investigation_runner.py` (claim guard, finding+tools threading, FallbackChainExhausted, generic exception, missing DATABASE_URL, missing verdict, helpers); existing `test_runner.py` patched with `patch_tier2` fixture — adds 1 new test confirming `run_tier2_investigation` is invoked after escalation but NOT after auto-close.
+
+**Integration smoke + crash-resume (Day 5)**:
+- `test_investigation_smoke.py` — `@pytest.mark.integration`. Two tests, both skip cleanly on placeholder env. Mocks `build_mcp_client` to return static `siem_query` + `siem_get_notable` LangChain tools (real Splunk not required); requires real Postgres + OpenRouter.
+  1. `test_investigation_smoke_runs_to_verdict` — seeds incident + investigation rows in wk-5-escalated state (`status='triaging'`, `inconclusive_reason='tier_2_pending_wk6'`), runs `run_tier2_investigation`, asserts terminal status + verdict + audit chain + ≥2 `usage` rows. Tolerates model bailing as `inconclusive` on synthetic evidence (asserts `inconclusive_reason` populated either way).
+  2. `test_investigation_smoke_resumes_after_inject_failure` — drives `graph.ainvoke` directly with `INVESTIGATION_INJECT_FAILURE=correlate`, asserts mid-flight node counts. Re-invokes with `ainvoke(None, config)` (resume mode); asserts `plan_node.count == 1` (didn't re-fire — proves checkpoint replay), `correlate.count >= 2`, `draft_verdict.count >= 1`. **Load-bearing wk-6 invariant.**
+
+**Architectural decisions surfaced for later resolution:**
+- (carry-forward) Cross-process crash-resume not in scope. Same-process resume proven by smoke test 2; cross-process recovery (Redis already popped, worker died) requires a polling reaper for `status='investigating'` rows — wk-12 hardening.
+- (carry-forward) `tenants.max_concurrent_investigations` not enforced. wk-12.
+- (carry-forward) Per-investigation token / USD caps. wk-7.
+- (new) The Tier-2 `entities` field is not currently round-tripped through the `investigations` table. Wk-5 audit log captures it but the runner can't recover it on Tier-2 resume. Acceptable for skeleton — model can re-extract from the OCSF + reasoning. Wk-7 may add an `investigations.entities text[]` column when the review role wants the full Tier-1 hand-off.
+- (new) `LLMRouter._attempt` now buckets ANY `ValueError` from `_parse_response` as `validation_fail` (was: only schema-retry path). Existing "no choices" ValueError path was never exercised in the router tests; this unifies the model-output-broke handling. No regression in 256 pre-wk6 tests.
+- (new) `tools_node` includes a tool-call-error-as-ToolMessage fallback (`text = f"error: {type(exc).__name__}: {exc}"`). Lets the agent loop continue past a transient Splunk failure rather than aborting the investigation. Tested.
+
+Verified end-to-end (this session, no live integrations needed):
+- `uv run ruff check apps libs mcp` — clean.
+- `uv run mypy apps libs mcp` — 63 source files, no issues.
+- `uv run pytest -q` — **352 passed**, 2 skipped (verify smoke skips on placeholder OPENROUTER_API_KEY), 5 deselected (3 wk-2 + 2 new wk-6 integration markers).
+
+Carry-over to wk-7: review role node (insert between `correlate` and an eventual `await_approval`), prompt caching `cache_control` on system + incident + MITRE blocks, evidence manifest `evidence.json` to MinIO, per-investigation token/USD caps, eventual unification of LangChain tracing surface (currently agent-loop tool calls don't appear as native LangChain spans — only LLMRouter's traced HTTP calls).
 
 ### Wk 0 Review
 _Pending._

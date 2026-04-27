@@ -31,6 +31,7 @@ from sentient_common.logging import get_logger
 from sentient_orchestrator.llm.exceptions import FallbackChainExhausted
 from sentient_orchestrator.llm.openrouter import (
     OpenRouterResponse,
+    OpenRouterToolCall,
     call_chat_completion,
 )
 from sentient_orchestrator.llm.usage import UsageStatus, log_usage_attempt
@@ -73,6 +74,7 @@ class LLMResult:
     cached_tokens: int
     cost_usd: float | None
     latency_ms: int
+    tool_calls: tuple[OpenRouterToolCall, ...] = ()
 
 
 class LLMRouter:
@@ -97,10 +99,26 @@ class LLMRouter:
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel] | None = None,
         investigation_id: UUID | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResult:
-        """Run the fallback loop for one role; return the first successful result."""
+        """Run the fallback loop for one role; return the first successful result.
+
+        `tools` + `tool_choice` are OpenAI-format pass-through (see
+        `openrouter.call_chat_completion` for the wire shape). When `tools` is
+        supplied, the LLMResult's `tool_calls` field reflects the model's
+        chosen calls.
+
+        Mutually exclusive: do not combine `tools` with `response_schema` —
+        most providers reject `tools + response_format=json_schema` together,
+        and the schema-retry logic doesn't apply when the model is expected
+        to emit a tool_call rather than schema-conforming JSON content.
+        """
         if role not in ACTIVE_ROLES:
             msg = f"unknown LLM role {role!r}"
+            raise ValueError(msg)
+        if tools and response_schema is not None:
+            msg = "tools and response_schema are mutually exclusive"
             raise ValueError(msg)
 
         role_cfg = self._load_role_config(self._conn, self._tenant_id, role)
@@ -121,6 +139,8 @@ class LLMRouter:
                         messages=messages,
                         response_schema=response_schema,
                         investigation_id=investigation_id,
+                        tools=tools,
+                        tool_choice=tool_choice,
                     )
                 except _AttemptFailedError as exc:
                     log.warning(
@@ -147,6 +167,8 @@ class LLMRouter:
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel] | None,
         investigation_id: UUID | None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResult:
         """Run one attempt. Raises `_AttemptFailedError` on retryable failure."""
         response_format = _schema_to_response_format(response_schema)
@@ -162,7 +184,21 @@ class LLMRouter:
                 timeout=float(role_cfg.timeout_seconds),
                 response_format=response_format,
                 region_constraint=self._tenant_cfg.region_constraint,
+                tools=tools,
+                tool_choice=tool_choice,
             )
+        except ValueError:
+            # `_parse_response` raises ValueError for malformed model output
+            # (no choices, malformed tool_call arguments). Bucket as
+            # validation_fail so the next model in the chain gets a turn.
+            self._log_failure(
+                attempt_num=attempt_num,
+                model_requested=model,
+                role=role,
+                investigation_id=investigation_id,
+                status="validation_fail",
+            )
+            raise _AttemptFailedError("validation_fail") from None
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (401, 403):
                 # Auth — infra error, not a per-attempt LLM ledger event.
@@ -259,6 +295,7 @@ class LLMRouter:
             cached_tokens=response.cached_tokens,
             cost_usd=response.cost_usd,
             latency_ms=response.latency_ms,
+            tool_calls=tuple(response.tool_calls),
         )
 
     async def _validate_with_retry(

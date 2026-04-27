@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from sentient_orchestrator.llm import router as router_module
 from sentient_orchestrator.llm.exceptions import FallbackChainExhausted
-from sentient_orchestrator.llm.openrouter import OpenRouterResponse
+from sentient_orchestrator.llm.openrouter import OpenRouterResponse, OpenRouterToolCall
 from sentient_orchestrator.llm.router import LLMRouter, _RoleConfig, _TenantConfig
 
 TENANT_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -496,3 +496,152 @@ def test_pydantic_validation_independent() -> None:
     _Out.model_validate_json('{"severity": "low"}')
     with pytest.raises(ValidationError):
         _Out.model_validate_json("not-json")
+
+
+# ---------------------------------------------------------------- tools
+
+
+def _tool_call_response(
+    *,
+    model: str = "model-a",
+    tool_calls: list[OpenRouterToolCall] | None = None,
+) -> OpenRouterResponse:
+    return OpenRouterResponse(
+        content="",
+        model_used=model,
+        generation_id="gen-tool",
+        input_tokens=20,
+        output_tokens=10,
+        cached_tokens=0,
+        cost_usd=0.0002,
+        latency_ms=50,
+        tool_calls=tool_calls or [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_tools_passthrough_to_call_chat_completion(
+    monkeypatch: pytest.MonkeyPatch, usage_calls: list[dict[str, Any]]
+) -> None:
+    _patch_loaders(
+        monkeypatch, tenant_cfg=_tenant_cfg(), role_cfg=_role_cfg(primary="model-a")
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_call(**kwargs: Any) -> OpenRouterResponse:
+        captured.update(kwargs)
+        return _tool_call_response(
+            tool_calls=[
+                OpenRouterToolCall(
+                    id="call_1", name="siem_query", arguments={"spl": "index=main"}
+                )
+            ]
+        )
+
+    monkeypatch.setattr(router_module, "call_chat_completion", fake_call)
+    router = LLMRouter(TENANT_ID, MagicMock())
+    tools = [
+        {"type": "function", "function": {"name": "siem_query", "parameters": {}}}
+    ]
+    result = await router.call(
+        role="investigation",
+        messages=[{"role": "user", "content": "investigate"}],
+        tools=tools,
+        tool_choice="auto",
+    )
+
+    assert captured["tools"] == tools
+    assert captured["tool_choice"] == "auto"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "siem_query"
+    assert result.tool_calls[0].arguments == {"spl": "index=main"}
+    assert usage_calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_no_tools_keeps_kwargs_unset(
+    monkeypatch: pytest.MonkeyPatch, usage_calls: list[dict[str, Any]]
+) -> None:
+    """No tools supplied → call_chat_completion receives tools=None, tool_choice=None."""
+    _patch_loaders(
+        monkeypatch, tenant_cfg=_tenant_cfg(), role_cfg=_role_cfg(primary="model-a")
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_call(**kwargs: Any) -> OpenRouterResponse:
+        captured.update(kwargs)
+        return _ok_response()
+
+    monkeypatch.setattr(router_module, "call_chat_completion", fake_call)
+    router = LLMRouter(TENANT_ID, MagicMock())
+    result = await router.call(role="triage", messages=[])
+
+    assert captured["tools"] is None
+    assert captured["tool_choice"] is None
+    assert result.tool_calls == ()
+
+
+@pytest.mark.asyncio
+async def test_tools_and_response_schema_mutually_exclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_loaders(monkeypatch, tenant_cfg=_tenant_cfg(), role_cfg=_role_cfg())
+    router = LLMRouter(TENANT_ID, MagicMock())
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await router.call(
+            role="triage",
+            messages=[],
+            tools=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+            response_schema=_Out,
+        )
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_args_falls_back_to_next_model(
+    monkeypatch: pytest.MonkeyPatch, usage_calls: list[dict[str, Any]]
+) -> None:
+    """ValueError from `_parse_response` (malformed tool args) → validation_fail → next model."""
+    _patch_loaders(
+        monkeypatch,
+        tenant_cfg=_tenant_cfg(),
+        role_cfg=_role_cfg(primary="model-a", fallback=["model-b"]),
+    )
+
+    async def fake_call(*, model: str, **_kwargs: Any) -> OpenRouterResponse:
+        if model == "model-a":
+            msg = "tool_call 'siem_query' has malformed JSON arguments: ..."
+            raise ValueError(msg)
+        return _tool_call_response(model="model-b")
+
+    monkeypatch.setattr(router_module, "call_chat_completion", fake_call)
+    router = LLMRouter(TENANT_ID, MagicMock())
+    result = await router.call(
+        role="investigation",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+    )
+
+    assert result.model_requested == "model-b"
+    assert [c["status"] for c in usage_calls] == ["validation_fail", "success"]
+
+
+@pytest.mark.asyncio
+async def test_no_tool_calls_in_response_returns_empty(
+    monkeypatch: pytest.MonkeyPatch, usage_calls: list[dict[str, Any]]
+) -> None:
+    """Model emits text content (no tool_calls) → LLMResult.tool_calls is empty."""
+    _patch_loaders(
+        monkeypatch, tenant_cfg=_tenant_cfg(), role_cfg=_role_cfg(primary="model-a")
+    )
+
+    async def fake_call(**_kwargs: Any) -> OpenRouterResponse:
+        return _tool_call_response(tool_calls=[])  # explicit empty
+
+    monkeypatch.setattr(router_module, "call_chat_completion", fake_call)
+    router = LLMRouter(TENANT_ID, MagicMock())
+    result = await router.call(
+        role="investigation",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+    )
+    assert result.tool_calls == ()

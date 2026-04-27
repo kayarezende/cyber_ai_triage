@@ -12,8 +12,9 @@ JSON. Cost comes from `usage.cost` when OpenRouter returns it (we send
 
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -21,6 +22,25 @@ import httpx
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://sentientlayer.ai"
 X_TITLE = "Sentient Layer Triage"
+
+
+@dataclass(frozen=True)
+class OpenRouterToolCall:
+    """One parsed tool-call from `choices[0].message.tool_calls`.
+
+    OpenRouter mirrors the OpenAI shape:
+        {"id": "...", "type": "function",
+         "function": {"name": "...", "arguments": "<json string>"}}
+
+    `arguments` is a JSON string on the wire; we parse to a dict here so callers
+    don't have to. Malformed JSON raises `ValueError` from `_parse_response` —
+    classified by the router as `validation_fail` (model output is broken, try
+    next model in the chain).
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -35,6 +55,7 @@ class OpenRouterResponse:
     cached_tokens: int
     cost_usd: float | None
     latency_ms: int
+    tool_calls: list[OpenRouterToolCall] = field(default_factory=list)
 
 
 async def call_chat_completion(
@@ -48,12 +69,24 @@ async def call_chat_completion(
     timeout: float,
     response_format: dict[str, Any] | None = None,
     region_constraint: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
 ) -> OpenRouterResponse:
     """POST /chat/completions; raise httpx errors; return parsed response.
 
     Caller (the router) catches `httpx.TimeoutException` + `httpx.HTTPStatusError`
     and classifies them into the `usage.status` enum. This function does no
     classification of its own — it just talks HTTP.
+
+    `tools` + `tool_choice` are OpenAI-format pass-through. `tools` is a list of
+    `{"type": "function", "function": {"name", "description", "parameters"}}`
+    dicts. `tool_choice` is `"auto" | "none" | "required" | {"type":"function",
+    "function":{"name":"..."}}`. Default `tool_choice="auto"` is sent only when
+    `tools` is supplied; absent otherwise (matches OpenAI spec).
+
+    Mutually exclusive at the call site: do not combine `tools` with
+    `response_format=json_schema` — most providers reject the combination.
+    The router enforces this; we don't double-check here.
     """
     body: dict[str, Any] = {
         "model": model,
@@ -64,6 +97,12 @@ async def call_chat_completion(
     }
     if response_format is not None:
         body["response_format"] = response_format
+    if tools:
+        body["tools"] = tools
+        # OpenRouter / OpenAI default is `auto` when tools are present.
+        # Pass through explicit choice when caller specified it.
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
     if region_constraint:
         # ADR-0016: dormant in MVP. OpenRouter's `provider` filter has no
         # `region` key today — region routing post-MVP requires a
@@ -102,6 +141,7 @@ def _parse_response(payload: dict[str, Any], *, latency_ms: int) -> OpenRouterRe
         raise ValueError(msg)
     message = choices[0].get("message") or {}
     content = message.get("content") or ""
+    tool_calls = _parse_tool_calls(message.get("tool_calls"))
 
     usage = payload.get("usage") or {}
     input_tokens = int(usage.get("prompt_tokens", 0) or 0)
@@ -124,7 +164,63 @@ def _parse_response(payload: dict[str, Any], *, latency_ms: int) -> OpenRouterRe
         cached_tokens=cached,
         cost_usd=cost_usd,
         latency_ms=latency_ms,
+        tool_calls=tool_calls,
     )
 
 
-__all__ = ["OpenRouterResponse", "call_chat_completion", "OPENROUTER_URL"]
+def _parse_tool_calls(raw: Any) -> list[OpenRouterToolCall]:
+    """Parse `choices[0].message.tool_calls` → list[OpenRouterToolCall].
+
+    Returns `[]` when absent / null / empty. Malformed JSON in `arguments`
+    raises `ValueError` so the router buckets the attempt as `validation_fail`
+    — same policy as a JSON-schema response that fails Pydantic validation.
+    """
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        return []
+    parsed: list[OpenRouterToolCall] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") or {}
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "")
+        if not name:
+            continue
+        args_raw = function.get("arguments")
+        # OpenAI/OpenRouter wire format: `arguments` is a JSON string.
+        # A dict is also tolerated (some providers pre-parse).
+        if isinstance(args_raw, str):
+            try:
+                arguments = json.loads(args_raw) if args_raw else {}
+            except json.JSONDecodeError as exc:
+                msg = f"tool_call {name!r} has malformed JSON arguments: {exc}"
+                raise ValueError(msg) from exc
+        elif isinstance(args_raw, dict):
+            arguments = args_raw
+        elif args_raw is None:
+            arguments = {}
+        else:
+            msg = f"tool_call {name!r} has unexpected arguments type {type(args_raw).__name__}"
+            raise ValueError(msg)
+        if not isinstance(arguments, dict):
+            msg = f"tool_call {name!r} arguments must be an object"
+            raise ValueError(msg)
+        parsed.append(
+            OpenRouterToolCall(
+                id=str(item.get("id") or ""),
+                name=name,
+                arguments=arguments,
+            )
+        )
+    return parsed
+
+
+__all__ = [
+    "OPENROUTER_URL",
+    "OpenRouterResponse",
+    "OpenRouterToolCall",
+    "call_chat_completion",
+]

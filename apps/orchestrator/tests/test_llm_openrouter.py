@@ -12,6 +12,7 @@ from sentient_orchestrator.llm.openrouter import (
     HTTP_REFERER,
     OPENROUTER_URL,
     X_TITLE,
+    OpenRouterToolCall,
     call_chat_completion,
 )
 
@@ -269,3 +270,287 @@ async def test_no_choices_raises_value_error() -> None:
                 temperature=0.0,
                 timeout=1.0,
             )
+
+
+# ---------------------------------------------------------------- tools
+
+
+def _tool_payload(*, tool_calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Response with tool_calls in the assistant message."""
+    return {
+        "id": "gen-tool",
+        "model": "google/gemini-3-flash-preview",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": tool_calls or [],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20, "cost": 0.0001},
+    }
+
+
+@pytest.mark.asyncio
+async def test_tools_passthrough_in_request_body() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_tool_payload())
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "siem_query",
+                "description": "Run an SPL query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"spl": {"type": "string"}},
+                    "required": ["spl"],
+                },
+            },
+        }
+    ]
+    async with _make_client(handler) as client:
+        await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+            tools=tools,
+            tool_choice="auto",
+        )
+    assert captured["body"]["tools"] == tools
+    assert captured["body"]["tool_choice"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_no_tools_no_tools_in_body() -> None:
+    """When `tools` is not supplied, body must not include `tools`/`tool_choice` keys."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_ok_payload())
+
+    async with _make_client(handler) as client:
+        await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+    assert "tools" not in captured["body"]
+    assert "tool_choice" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_only_emitted_when_specified() -> None:
+    """`tools` set but `tool_choice` omitted → body has tools but no tool_choice."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_tool_payload())
+
+    async with _make_client(handler) as client:
+        await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+            tools=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+        )
+    assert "tools" in captured["body"]
+    assert "tool_choice" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_response_parses_tool_calls() -> None:
+    payload = _tool_payload(
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "siem_query",
+                    "arguments": '{"spl": "index=main", "earliest": "-1h"}',
+                },
+            }
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with _make_client(handler) as client:
+        response = await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+    assert len(response.tool_calls) == 1
+    tc = response.tool_calls[0]
+    assert isinstance(tc, OpenRouterToolCall)
+    assert tc.id == "call_1"
+    assert tc.name == "siem_query"
+    assert tc.arguments == {"spl": "index=main", "earliest": "-1h"}
+
+
+@pytest.mark.asyncio
+async def test_response_parses_multiple_tool_calls() -> None:
+    payload = _tool_payload(
+        tool_calls=[
+            {
+                "id": "call_a",
+                "type": "function",
+                "function": {"name": "siem_query", "arguments": '{"spl": "x"}'},
+            },
+            {
+                "id": "call_b",
+                "type": "function",
+                "function": {
+                    "name": "siem_get_notable",
+                    "arguments": '{"notable_id": "abc"}',
+                },
+            },
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with _make_client(handler) as client:
+        response = await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+    assert [tc.name for tc in response.tool_calls] == ["siem_query", "siem_get_notable"]
+
+
+@pytest.mark.asyncio
+async def test_response_no_tool_calls_returns_empty_tuple() -> None:
+    """Plain content response: tool_calls=[]."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_ok_payload())
+
+    async with _make_client(handler) as client:
+        response = await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+    assert response.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_arguments_raises_value_error() -> None:
+    payload = _tool_payload(
+        tool_calls=[
+            {
+                "id": "call_x",
+                "type": "function",
+                "function": {"name": "siem_query", "arguments": "{not valid json"},
+            }
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with _make_client(handler) as client:
+        with pytest.raises(ValueError, match="malformed JSON arguments"):
+            await call_chat_completion(
+                client=client,
+                api_key="k",
+                model="m",
+                messages=[],
+                max_tokens=1,
+                temperature=0.0,
+                timeout=1.0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_tool_arguments_can_be_dict() -> None:
+    """Some providers pre-parse `arguments` to a dict; tolerated."""
+    payload = _tool_payload(
+        tool_calls=[
+            {
+                "id": "call_d",
+                "type": "function",
+                "function": {"name": "siem_query", "arguments": {"spl": "x"}},
+            }
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with _make_client(handler) as client:
+        response = await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+    assert response.tool_calls[0].arguments == {"spl": "x"}
+
+
+@pytest.mark.asyncio
+async def test_tool_arguments_empty_string_treated_as_empty_dict() -> None:
+    payload = _tool_payload(
+        tool_calls=[
+            {
+                "id": "call_e",
+                "type": "function",
+                "function": {"name": "noop", "arguments": ""},
+            }
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with _make_client(handler) as client:
+        response = await call_chat_completion(
+            client=client,
+            api_key="k",
+            model="m",
+            messages=[],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=1.0,
+        )
+    assert response.tool_calls[0].arguments == {}

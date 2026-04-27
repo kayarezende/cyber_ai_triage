@@ -152,6 +152,18 @@ def patch_mitre(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture
+def patch_tier2(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace run_tier2_investigation with an awaitable noop that records args."""
+    calls: list[dict[str, Any]] = []
+
+    async def _fake(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(runner_module, "run_tier2_investigation", _fake)
+    return calls
+
+
 def _patch_run_triage(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -244,6 +256,7 @@ async def test_escalates_on_high_severity(
     audit_calls: list[dict[str, Any]],
     patch_router: MagicMock,
     patch_mitre: None,
+    patch_tier2: list[dict[str, Any]],
 ) -> None:
     _patch_run_triage(
         monkeypatch,
@@ -274,6 +287,12 @@ async def test_escalates_on_high_severity(
     actions = [a["action"] for a in audit_calls]
     assert "triage_escalated" in actions
 
+    # Tier-2 invoked with the same identifiers.
+    assert len(patch_tier2) == 1
+    call = patch_tier2[0]
+    assert call["tenant_id"] == TENANT_ID
+    assert call["incident_id"] == INCIDENT_ID
+
 
 @pytest.mark.parametrize("severity", ["medium", "high", "critical"])
 @pytest.mark.asyncio
@@ -284,6 +303,7 @@ async def test_escalates_for_each_high_severity(
     audit_calls: list[dict[str, Any]],
     patch_router: MagicMock,
     patch_mitre: None,
+    patch_tier2: list[dict[str, Any]],
 ) -> None:
     _patch_run_triage(
         monkeypatch,
@@ -298,6 +318,32 @@ async def test_escalates_for_each_high_severity(
     await runner_module.run_investigation(_job())
     assert _find_action(audit_calls, "triage_escalated") is not None
     assert _find_action(audit_calls, "triage_auto_close") is None
+    # Tier-2 invoked exactly once per escalation.
+    assert len(patch_tier2) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_close_does_not_invoke_tier2(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_session: _FakeConn,
+    audit_calls: list[dict[str, Any]],
+    patch_router: MagicMock,
+    patch_mitre: None,
+    patch_tier2: list[dict[str, Any]],
+) -> None:
+    """Low/info auto-close path must NOT trigger Tier-2."""
+    _patch_run_triage(
+        monkeypatch,
+        output=TriageOutput(
+            severity="low",
+            confidence=90,
+            mitre_guesses=[],
+            entities_to_investigate=[],
+            reasoning="benign.",
+        ),
+    )
+    await runner_module.run_investigation(_job())
+    assert patch_tier2 == []
 
 
 # ---------------------------------------------------------------- fallback exhausted
