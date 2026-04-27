@@ -21,6 +21,9 @@ export async function TopBar() {
             <Link href="/audit" className="hover:text-zinc-100">
               Audit
             </Link>
+            <Link href="/admin" className="hover:text-zinc-100">
+              Admin
+            </Link>
           </nav>
         </div>
         <div className="text-xs text-zinc-500 font-mono">

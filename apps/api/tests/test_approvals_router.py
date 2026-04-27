@@ -155,10 +155,10 @@ def test_pending_inbox(
         conn.execute.side_effect = execute
         yield conn
 
-    import pytest as _pytest  # noqa: F401
-
     # Override the patched session for this test only.
     from unittest.mock import patch as _patch
+
+    import pytest as _pytest  # noqa: F401
 
     with _patch(
         "sentient_api.routers.approvals.tenant_session", fake_session

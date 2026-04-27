@@ -9,6 +9,12 @@ so the wk-9 web UI (and any future MSSP-style routing) can target a specific
 tenant without code changes. The header is only trusted under bypass; in
 prod (wk-11) Entra writes `request.state.tenant_id` from the JWT `tid` claim
 and ignores the header entirely.
+
+Wk-10: same dev-bypass-only treatment for `X-Dev-Role` so the wk-10 admin
+panel routers can be exercised as both `analyst` (403 expected) and `admin`
+(200) without monkeypatching middleware in every test. Defaults to `admin`
+to keep existing dev sessions unchanged. Post Entra (wk 11) the role comes
+from the JWT `roles` claim and the header is ignored.
 """
 
 from __future__ import annotations
@@ -38,6 +44,9 @@ _ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
+_VALID_DEV_ROLES: frozenset[str] = frozenset({"admin", "analyst"})
+
+
 def _resolve_tenant_id(request: Request, default: str) -> str:
     """Read X-Tenant-Id (dev-bypass only); fall back to DEV_TENANT_ID.
 
@@ -52,6 +61,21 @@ def _resolve_tenant_id(request: Request, default: str) -> str:
     except ValueError as exc:
         msg = "X-Tenant-Id is not a valid UUID"
         raise ValueError(msg) from exc
+
+
+def _resolve_role(request: Request, default: str = "admin") -> str:
+    """Read X-Dev-Role (dev-bypass only); fall back to admin.
+
+    Restricted to the values `users.role` accepts. Unknown values raise
+    so the middleware returns a 400 — mirrors X-Tenant-Id ergonomics.
+    """
+    header = request.headers.get("X-Dev-Role")
+    if not header:
+        return default
+    if header not in _VALID_DEV_ROLES:
+        msg = f"X-Dev-Role must be one of {sorted(_VALID_DEV_ROLES)}"
+        raise ValueError(msg)
+    return header
 
 
 class DevBypassAuthMiddleware(BaseHTTPMiddleware):
@@ -85,10 +109,17 @@ class DevBypassAuthMiddleware(BaseHTTPMiddleware):
                 status_code=400,
                 content={"error": "invalid_tenant_header", "detail": str(exc)},
             )
+        try:
+            role = _resolve_role(request)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_role_header", "detail": str(exc)},
+            )
 
         request.state.user = {
             "email": settings.dev_user_email,
-            "role": "admin",
+            "role": role,
         }
         request.state.tenant_id = tenant_id
         return await call_next(request)

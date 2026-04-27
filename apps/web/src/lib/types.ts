@@ -133,3 +133,69 @@ export interface EvidenceManifest {
   attempts?: Array<Record<string, unknown>>;
   [extra: string]: unknown;
 }
+
+// ---- wk-10 admin panel
+
+export type LlmRole =
+  | "triage"
+  | "investigation"
+  | "review"
+  | "summarize"
+  | "entity_extraction";
+
+export interface LlmRoleConfig {
+  role: LlmRole;
+  primary_model: string;
+  fallback_chain: string[];
+  max_tokens: number;
+  temperature: number;
+  timeout_seconds: number;
+  enabled: boolean;
+}
+
+export interface LlmRoleListResponse {
+  items: LlmRoleConfig[];
+}
+
+export interface HitlPolicy {
+  id: string;
+  tenant_id: string | null;
+  name: string;
+  rule_expression: Record<string, unknown>;
+  priority: number;
+  enabled: boolean;
+}
+
+export interface HitlPolicyListResponse {
+  items: HitlPolicy[];
+}
+
+export interface TenantBudgets {
+  max_concurrent_investigations: number | null;
+  monthly_llm_budget_usd: number | null;
+  per_investigation_budget_usd: number | null;
+  per_investigation_token_cap: number | null;
+}
+
+export type WritebackMode = "dual" | "hec_only";
+
+export interface SplunkConfig {
+  splunk_host: string | null;
+  writeback_mode: WritebackMode;
+  has_management_token: boolean;
+  has_hec_token: boolean;
+}
+
+export type UserRole = "analyst" | "admin";
+
+export interface TenantUser {
+  id: string;
+  email: string;
+  role: UserRole;
+  entra_oid: string | null;
+  created_at: string | null;
+}
+
+export interface TenantUserListResponse {
+  items: TenantUser[];
+}

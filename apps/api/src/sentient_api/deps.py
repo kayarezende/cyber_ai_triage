@@ -35,6 +35,25 @@ def get_request_tenant(request: Request) -> UUID:
 TenantId = Annotated[UUID, Depends(get_request_tenant)]
 
 
+def require_admin(request: Request) -> dict[str, str]:
+    """Gate admin endpoints on `users.role='admin'`.
+
+    Reads the user dict middleware writes onto `request.state`. Under
+    dev-bypass that's `{email, role}` from `DevBypassAuthMiddleware`; post
+    Entra SSO (wk 11) the same shape gets populated from the JWT claims so
+    this dep stays valid without code change.
+    """
+    user = getattr(request.state, "user", None)
+    if not isinstance(user, dict):
+        raise HTTPException(status_code=401, detail="user_unresolved")
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="admin_required")
+    return user
+
+
+RequireAdmin = Annotated[dict[str, str], Depends(require_admin)]
+
+
 @dataclass(frozen=True)
 class Pagination:
     """Forward-cursor pagination params. Cursor is opaque to clients."""
@@ -88,6 +107,7 @@ def decode_uuid_ts_cursor(cursor: str | None) -> tuple[str, UUID] | None:
 __all__ = [
     "PageParams",
     "Pagination",
+    "RequireAdmin",
     "TenantId",
     "decode_int_cursor",
     "decode_uuid_ts_cursor",
@@ -95,4 +115,5 @@ __all__ = [
     "encode_uuid_ts_cursor",
     "get_request_tenant",
     "parse_pagination",
+    "require_admin",
 ]

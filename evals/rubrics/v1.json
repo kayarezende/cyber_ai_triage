@@ -1,0 +1,35 @@
+{
+  "version": "v1",
+  "description": "Wk-10 baseline rubric. Verdict accuracy + MITRE F1 + severity calibration. Pass thresholds gate wk-11 quality work.",
+  "verdict_categories": [
+    "true_positive",
+    "false_positive",
+    "benign",
+    "inconclusive"
+  ],
+  "severity_categories": [
+    "info",
+    "low",
+    "medium",
+    "high",
+    "critical"
+  ],
+  "scoring": {
+    "verdict_accuracy_weight": 0.5,
+    "mitre_f1_weight": 0.4,
+    "severity_accuracy_weight": 0.1
+  },
+  "thresholds": {
+    "verdict_accuracy_pass": 0.85,
+    "mitre_f1_pass": 0.70,
+    "overall_pass": 0.75
+  },
+  "fail_categories": [
+    "prompt",
+    "tool",
+    "schema",
+    "ambiguous_label",
+    "fallback_exhausted",
+    "timeout"
+  ]
+}

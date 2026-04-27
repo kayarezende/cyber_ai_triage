@@ -43,6 +43,7 @@ logs/
 
 # Docker
 docker-compose.override.yml.local
+docker-compose.override.local.yml
 
 # Data / artifacts (dev only)
 data/
@@ -63,3 +64,4 @@ db/seeds/cache/
 
 # Claude / tooling
 .claude/settings.local.json
+.claude/scheduled_tasks.lock

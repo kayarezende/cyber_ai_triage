@@ -66,6 +66,7 @@ exclude = [
     'apps/[a-z_]+/tests/.*',
     'libs/[a-z_]+/tests/.*',
     'mcp/[a-z_]+/tests/.*',
+    'evals/harness/test_.*',
 ]
 
 # Third-party libs without type stubs.
@@ -81,7 +82,7 @@ module = ["sentient_mcp_splunk.main"]
 disallow_untyped_decorators = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "apps", "mcp", "libs"]
+testpaths = ["tests", "apps", "mcp", "libs", "evals"]
 markers = [
     "integration: requires live Splunk; founder-box only",
 ]

@@ -578,20 +578,26 @@ _Wk-8 founder live-gates pending — same flow as wk-6/7:_
 - [ ] **Continue labeling (~2 hrs, target ~10 more incidents).**
 
 **Wk 10 — Admin panel + eval harness**
-- [ ] Admin panel pages:
-  - LLM role config (table of 5 roles, edit primary + fallback + caps + enable toggle).
-  - HITL policies (JSON textbox for `rule_expression` + enable toggle).
-  - Concurrency limit + budget caps (per-investigation + monthly).
-  - Splunk connection config (host, service account token, HEC token).
-  - Users + roles.
-  - Usage dashboard (tokens + cost + attempts by role by month).
-- [ ] Eval harness: `python evals/run_eval.py` → scored HTML report.
+- [ ] Admin panel pages (5 of 6 in scope per `plan-next-phase-jiggly-bumblebee.md`; usage dashboard slipped to wk 11):
+  - [x] LLM role config — backend router (`apps/api/src/sentient_api/routers/admin/llm_roles.py`, 27 admin tests green).
+  - [x] HITL policies — backend router with `validate_policy_shape` save-time guard.
+  - [x] Concurrency limit + budget caps — backend router (`budgets.py`).
+  - [x] Splunk connection config — backend router with httpx connection probe + `skip_probe` opt-out.
+  - [x] Users + roles — backend router; email lower-cased on invite.
+  - [x] Frontend pages for the five backend routers above (Phase 4 of the plan: `apps/web/src/app/admin/{layout,llm-roles,hitl-policies,budgets,splunk,users}/page.tsx` + corresponding components, server actions in `apps/web/src/lib/server-actions/admin.ts`, AdminNav side-nav, TopBar Admin link). Next.js production build green.
+  - [ ] ~~Usage dashboard~~ → moved to wk 11.
+- [x] Eval harness: `python evals/run_eval.py` → scored HTML report. 36 unit tests green.
 - [ ] Atomic Red Team runs on lab VM → logs to Splunk.
 - [ ] Honeypot log pipeline into Splunk.
 - [ ] Finish 50-incident golden set (~35 should be labeled from wk 6-9).
-- [ ] Baseline agent against golden set.
+- [ ] Baseline agent against golden set (founder live-stack run, deferred).
+- [x] Wk-10 supporting changes:
+  - [x] `evaluate_policy` extracted to `libs/common/src/sentient_common/hitl.py` (was orchestrator-only) so the API admin panel can validate without LangGraph deps.
+  - [x] `X-Dev-Role` header added to `DevBypassAuthMiddleware` so admin-gate tests run end-to-end without monkeypatching the middleware.
+  - [x] `RequireAdmin` dep in `apps/api/src/sentient_api/deps.py` — survives unchanged into wk-11 Entra SSO.
 
 **Wk 11 — Quality iteration + Entra SSO**
+- [ ] Usage dashboard (tokens + cost + attempts by role by month) — backend + frontend, slipped from wk 10.
 - [ ] Triage eval failures → categorize (prompt / tool / schema / ambiguous label).
 - [ ] Prompt + rule tuning. Target ≥85% verdict, ≥0.70 MITRE F1.
 - [ ] **Entra ID SSO**: FastAPI OIDC + Next.js middleware. Dev bypass remains behind env flag.

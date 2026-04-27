@@ -291,3 +291,31 @@ All 3 gates PASSED end-to-end. Several environment-specific gotchas surfaced; al
 - The CLI hack accepts arbitrary UUIDs (dev tool); a typo or copy-paste from a different env would trip this. Wk-9 web UI auth would normally guarantee a real user, but defensive design in shared codepaths matters.
 - Fix: SQL-level resolution via `WITH resolved AS (SELECT id FROM users WHERE id = :candidate)` + `human_approved_by = COALESCE((SELECT user_id FROM resolved), human_approved_by)`. Missing user → subquery returns NULL → COALESCE preserves the existing FK column → no rollback. The application-mirror column (`approver_id` plain UUID) still gets the analyst's UUID for audit purposes.
 - **Rule:** when an UPDATE writes to a FK column from external/untrusted input, resolve the FK via a subquery `(SELECT id FROM <ref> WHERE id = :candidate)` rather than passing the candidate as a direct parameter. The subquery returns NULL on missing parent row; `COALESCE` lets you preserve current state cleanly. Otherwise a bad input crashes the entire txn and leaves observable state inconsistent.
+
+## Wk 10 (admin panel + eval harness)
+
+### API can't import from orchestrator — extract pure helpers to libs/common
+- Wk-10 admin panel needs to validate HITL `rule_expression` JSON on save. The validator (`evaluate_policy`) lived in `apps/orchestrator/src/sentient_orchestrator/investigation/hitl_policy.py`; importing it from the API would have dragged LangGraph + LangChain + langchain-mcp-adapters into the API container.
+- Fix: extract the pure walker (`evaluate_policy` + `_to_number` + `_LOGICAL_OPS`/`_LEAF_OPS`/`_MAX_DEPTH`) to `libs/common/src/sentient_common/hitl.py`. Orchestrator's `hitl_policy.py` re-imports it for backward compat (existing 19 unit tests still green). API gains a thin `validate_policy_shape(expr)` helper that walks the tree with `ctx={}`; missing-key short-circuit means leaf ops still validate even with no fields populated.
+- **Rule:** when API + orchestrator both need a piece of logic, push the *pure* slice down to `libs/common` and keep the IO-coupled wrapper in the consumer. Resist the urge to "let the API import from orchestrator just this once" — every such concession compounds the API container's deploy weight + slows test boot.
+
+### Test admin gates with a header, not a middleware monkeypatch
+- `RequireAdmin` reads `request.state.user["role"]`. The dev-bypass middleware originally hardcoded `role="admin"`, so testing the 403 path required either monkeypatching the middleware in every test or scaffolding a parallel TestClient with role="analyst".
+- Fix: extend the middleware to honour `X-Dev-Role` (limited to `admin`/`analyst`) under `DEV_BYPASS_AUTH=1` only. Default stays `admin`. Tests pass `headers={"X-Dev-Role": "analyst"}` and assert 403; admin tests pass `"admin"` (or no header). Post Entra (wk 11) the role comes from the JWT `roles` claim and the header is ignored.
+- This is cheaper and more honest than `monkeypatch.setattr` because the test exercises the real middleware → dep → router chain. The 403 path that ships in production is the one the test asserts on.
+- **Rule:** when a dependency reads from `request.state` populated by middleware, expose a header-based override under dev-bypass for testability. Don't reach into middleware internals from tests when the production path itself is testable end-to-end.
+
+### Stdlib over Jinja2 for one HTML report
+- The eval harness needed an HTML report. Plan said Jinja2; tasted dependency-heavy for one template that diffs in git. Rebuilt it with `html.escape` + Python f-strings + inline CSS. Zero new deps. Diffs cleanly because the template is deterministic — no random IDs, no embedded timestamps in the body besides the run header.
+- The output is ~150 lines of HTML for 50 incidents. Jinja2 would be cleaner if we had 5 templates that shared a base layout; for one shot, stdlib wins.
+- **Rule:** before adding a templating library, check whether the surface is one template or many. One template + a small report renderer = stdlib. Many templates with shared layout / inheritance = Jinja2. The dep weight matters for container build time + supply-chain audit.
+
+### Pydantic `EmailStr` requires the `[email]` extra — surfaces at app startup
+- Initial users-router used `EmailStr` for the invite payload. App startup failed with `email-validator is not installed, run pip install 'pydantic[email]'` — and because it surfaced through middleware-level monkeypatching of `open_checkpointer`, the test failure mode was confusing (looked like a checkpointer issue).
+- Fix: plain `str` + a relaxed regex `r"^[^@\s]+@[^@\s]+\.[^@\s]+$"`. Adequate for an admin-curated invite list.
+- **Rule:** treat `EmailStr` as a non-trivial dep (`pydantic[email]` pulls in `email-validator` + `dnspython`-style stack on some configs). For an internal admin field where validation strictness isn't load-bearing, plain `str` + regex is a smaller blast radius.
+
+### Test rootdir + import path matters for new test trees
+- `evals/harness/test_runner.py` imported `from evals.harness.runner import …` and failed at collection with `ModuleNotFoundError`. Two fixes were required: (a) `evals/__init__.py` to mark it a package; (b) adding `"evals"` to `[tool.pytest.ini_options].testpaths`. The first alone makes tests discoverable from the cli (`pytest evals/`) but the second is what makes them collected by a bare `pytest` from repo root.
+- The `run_eval.py` CLI hits the same problem from a different angle: when run as `python evals/run_eval.py` (script form) Python adds `evals/` to sys.path so `from harness.x import` works; when run as `python -m evals.run_eval` it expects `from evals.harness.x import`. Resolved with a small `if __name__ == "__main__"` sys.path guard so both invocation forms work, then absolute imports throughout. Mypy resolves the absolute form cleanly; the runtime guard keeps the documented `python evals/run_eval.py` path alive.
+- **Rule:** when adding a new top-level test tree, both an `__init__.py` AND `testpaths` are required. When adding a CLI entry inside an importable package, prefer absolute imports + a `__main__`-only sys.path bootstrap so script form, module form (`-m`), and mypy all agree.
