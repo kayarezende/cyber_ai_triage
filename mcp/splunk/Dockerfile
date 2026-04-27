@@ -14,6 +14,7 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY libs/common ./libs/common
+COPY libs/ocsf ./libs/ocsf
 COPY mcp/splunk ./mcp/splunk
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --package sentient-mcp-splunk

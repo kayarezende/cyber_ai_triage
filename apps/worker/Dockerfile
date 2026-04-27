@@ -14,6 +14,7 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY libs/common ./libs/common
+COPY libs/ocsf ./libs/ocsf
 COPY apps/orchestrator ./apps/orchestrator
 COPY apps/worker ./apps/worker
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -24,6 +25,7 @@ FROM python:${PYTHON_VERSION}-slim AS runtime
 
 WORKDIR /app
 COPY --from=builder /app /app
+COPY libs/ocsf ./libs/ocsf
 COPY apps/orchestrator ./apps/orchestrator
 COPY apps/worker ./apps/worker
 
