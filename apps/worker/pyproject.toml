@@ -5,7 +5,10 @@ description = "Redis queue consumer"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
-    "sentient-common[db]",
+    # storage extra needed for wk-9 resume_investigation path: imports
+    # `evidence.py` → `sentient_common.storage` → `minio` (manifest upload
+    # on resume completion).
+    "sentient-common[db,storage]",
     # In-process dispatch — worker imports run_investigation directly.
     # Wk-6 swaps the body for the LangGraph Tier-2 runner; import path stable.
     "sentient-orchestrator",

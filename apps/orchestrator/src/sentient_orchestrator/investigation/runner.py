@@ -26,10 +26,12 @@ from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.types import Command
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from sentient_common.db import tenant_session
+from sentient_common.jobs import ResumeJob
 from sentient_common.logging import get_logger
 from sentient_ocsf.detection_finding import (
     DetectionFinding,
@@ -692,4 +694,127 @@ def _pg_text_array(items: list[str]) -> str:
     return "{" + ",".join(items) + "}"
 
 
-__all__ = ["run_tier2_investigation"]
+# ---------------------------------------------------------------- resume entry
+
+
+def _load_resume_context(
+    investigation_id: UUID, tenant_id: UUID
+) -> tuple[UUID, str, DetectionFinding, list[str]]:
+    """Pull incident_id, thread_id, OCSF finding, MITRE technique IDs.
+
+    Reads under `tenant_session(tenant_id)` so RLS is in effect (the API
+    has already authenticated the analyst against the tenant; the worker
+    inherits that authority via the ResumeJob).
+    """
+    with tenant_session(tenant_id) as conn:
+        inv_row = conn.execute(
+            text(
+                """
+                SELECT incident_id, langgraph_thread_id, mitre_techniques
+                  FROM investigations WHERE id = :id
+                """
+            ),
+            {"id": str(investigation_id)},
+        ).first()
+        if inv_row is None:
+            msg = f"investigation {investigation_id} not found"
+            raise RuntimeError(msg)
+        incident_id = UUID(str(inv_row[0]))
+        thread_id = str(inv_row[1]) if inv_row[1] else ""
+        if not thread_id:
+            msg = (
+                f"investigation {investigation_id} has no langgraph_thread_id; "
+                "not interruptable"
+            )
+            raise RuntimeError(msg)
+        mitre_ids = list(inv_row[2] or [])
+
+        ocsf_row = conn.execute(
+            text("SELECT ocsf_normalized FROM incidents WHERE id = :id"),
+            {"id": str(incident_id)},
+        ).first()
+        if ocsf_row is None or not ocsf_row[0]:
+            msg = f"incident {incident_id} missing ocsf_normalized"
+            raise RuntimeError(msg)
+    finding = validate_detection_finding(ocsf_row[0])
+    return incident_id, thread_id, finding, mitre_ids
+
+
+async def resume_investigation(job: ResumeJob) -> int:
+    """Resume a paused LangGraph thread with the analyst's decision.
+
+    Called by both the wk-9 worker (`QUEUE_RESUMES`) and the wk-8 CLI hack
+    (`cli_resume.py`). Re-attaches the same MCP toolset + AsyncPostgresSaver
+    the original run used, then `Command(resume=...)`s the graph past
+    `await_approval_node`. After completion calls `_finalize_after_graph`
+    so the verdict + writeback + approval surface lands on the
+    investigations row.
+
+    Returns 0 on clean completion, 2 if the graph re-entered an interrupted
+    state (shouldn't happen with a single approval node — defensive log).
+    """
+    investigation_id = job.investigation_id
+    tenant_id = job.tenant_id
+    incident_id, thread_id, finding, mitre_ids = _load_resume_context(
+        investigation_id, tenant_id
+    )
+
+    with tenant_session(tenant_id) as conn:
+        mitre_descs = (
+            fetch_technique_descriptions(conn, mitre_ids) if mitre_ids else {}
+        )
+
+    mcp_client = build_mcp_client()
+    tools = await mcp_client.get_tools()
+
+    db_url = _strip_psycopg_dsn(os.environ.get("DATABASE_URL", ""))
+    if not db_url:
+        msg = "DATABASE_URL not configured"
+        raise RuntimeError(msg)
+
+    async with AsyncPostgresSaver.from_conn_string(db_url) as checkpointer:
+        graph = build_investigation_graph().compile(checkpointer=checkpointer)
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                "tenant_id": str(tenant_id),
+                "investigation_id": str(investigation_id),
+                "finding": finding,
+                "tools": tools,
+                "mitre_descs": mitre_descs,
+            }
+        }
+        resume_payload: dict[str, Any] = {
+            "approved": job.approved,
+            "analyst_id": job.analyst_id,
+            "notes": job.notes,
+        }
+        log.info(
+            "resuming investigation",
+            investigation_id=str(investigation_id),
+            thread_id=thread_id,
+            approved=job.approved,
+            trace_id=job.trace_id,
+        )
+        final_state = await graph.ainvoke(
+            Command(resume=resume_payload), config=config
+        )
+
+    if _is_interrupted(final_state):
+        log.warning(
+            "graph re-entered interrupted state after resume",
+            investigation_id=str(investigation_id),
+        )
+        return 2
+
+    await _finalize_after_graph(
+        investigation_id=investigation_id,
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        finding=finding,
+        final_state=cast(InvestigationState, final_state),
+    )
+    return 0
+
+
+__all__ = ["resume_investigation", "run_tier2_investigation"]

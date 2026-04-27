@@ -1,7 +1,8 @@
 """FastAPI entrypoint.
 
-Wire-up only — real domain routers (incidents, investigations, admin) land in
-subsequent weeks per tasks/todo.md.
+Wires up domain routers + the lifespan-cached LangGraph checkpointer the
+wk-9 replay endpoints depend on. The orchestrator stays out of this
+process — only `libs/common` schemas + storage + audit helpers leak in.
 """
 
 from __future__ import annotations
@@ -11,8 +12,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from sentient_api.clients.checkpointer import (
+    close_checkpointer,
+    open_checkpointer,
+)
 from sentient_api.middleware.auth import DevBypassAuthMiddleware
-from sentient_api.routers import health, incidents
+from sentient_api.routers import (
+    approvals,
+    audit,
+    health,
+    incidents,
+    investigations,
+    replay,
+)
 from sentient_common.logging import configure_logging, get_logger
 
 configure_logging(service="api")
@@ -20,12 +32,20 @@ log = get_logger(__name__)
 
 
 @asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await open_checkpointer(app)
     log.info("api ready")
-    yield
+    try:
+        yield
+    finally:
+        await close_checkpointer(app)
 
 
 app = FastAPI(title="Sentient Layer API", version="0.0.1", lifespan=_lifespan)
 app.add_middleware(DevBypassAuthMiddleware)
 app.include_router(health.router)
 app.include_router(incidents.router)
+app.include_router(investigations.router)
+app.include_router(approvals.router)
+app.include_router(audit.router)
+app.include_router(replay.router)

@@ -115,3 +115,30 @@ def client(configured_env: None) -> TestClient:
     from sentient_api.main import app
 
     return TestClient(app)
+
+
+@pytest.fixture
+def stub_checkpointer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the lifespan checkpointer hooks with no-ops so tests don't
+    require Postgres at app startup. Replay endpoints that call
+    `get_checkpointer(app)` see `None` unless tests opt back in.
+    """
+    async def _noop_open(_app: Any) -> None:
+        return None
+
+    async def _noop_close(_app: Any) -> None:
+        return None
+
+    monkeypatch.setattr("sentient_api.main.open_checkpointer", _noop_open)
+    monkeypatch.setattr("sentient_api.main.close_checkpointer", _noop_close)
+
+
+@pytest.fixture
+def wk9_client(configured_env: None, stub_checkpointer: None) -> TestClient:
+    """TestClient for wk-9 router tests — DB/Redis/MinIO are patched per-test
+    at the router module level; lifespan checkpointer open is a no-op so the
+    app starts without Postgres.
+    """
+    from sentient_api.main import app
+
+    return TestClient(app)

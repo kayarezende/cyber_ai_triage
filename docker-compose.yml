@@ -171,7 +171,9 @@ services:
     environment:
       DEV_BYPASS_AUTH: ${DEV_BYPASS_AUTH:-1}
       DEV_USER_EMAIL: ${DEV_USER_EMAIL:-dev@sentientlayer.ai}
+      DEV_TENANT_ID: ${DEV_TENANT_ID:-00000000-0000-0000-0000-000000000001}
       NEXT_PUBLIC_API_URL: http://api.triage.local
+      API_INTERNAL_URL: http://api:8000
     depends_on:
       api:
         condition: service_healthy

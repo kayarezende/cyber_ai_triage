@@ -1880,6 +1880,8 @@ source = { editable = "apps/api" }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "langgraph-checkpoint-postgres" },
+    { name = "psycopg-pool" },
     { name = "pydantic-settings" },
     { name = "sentient-common", extra = ["db", "storage"] },
     { name = "sentient-ocsf" },
@@ -1896,6 +1898,8 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "langgraph-checkpoint-postgres", specifier = ">=3.0" },
+    { name = "psycopg-pool", specifier = ">=3.2" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "sentient-common", extras = ["db", "storage"], editable = "libs/common" },
     { name = "sentient-ocsf", editable = "libs/ocsf" },
@@ -2084,7 +2088,7 @@ version = "0.0.1"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "httpx" },
-    { name = "sentient-common", extra = ["db"] },
+    { name = "sentient-common", extra = ["db", "storage"] },
     { name = "sentient-orchestrator" },
 ]
 
@@ -2097,7 +2101,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
-    { name = "sentient-common", extras = ["db"], editable = "libs/common" },
+    { name = "sentient-common", extras = ["db", "storage"], editable = "libs/common" },
     { name = "sentient-orchestrator", editable = "apps/orchestrator" },
 ]
 

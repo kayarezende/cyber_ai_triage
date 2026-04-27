@@ -3,15 +3,19 @@
 Severity literal mirrors `investigations.severity` enum (5-value set;
 `unknown` + `fatal` from OCSF's wider scale are excluded — the agent always
 picks a confident severity).
+
+`Severity` lives in `sentient_common.schemas.investigation` so the API +
+frontend can share it without pulling the orchestrator deps. Re-exported
+here for existing import sites.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Severity = Literal["info", "low", "medium", "high", "critical"]
+from sentient_common.schemas.investigation import Severity
 
 
 class TriageOutput(BaseModel):

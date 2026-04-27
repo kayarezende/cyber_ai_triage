@@ -76,4 +76,38 @@ def upload_evidence(
     return key
 
 
-__all__ = ["StorageError", "upload_evidence"]
+class ObjectNotFoundError(StorageError):
+    """The requested key does not exist in the bucket."""
+
+
+def download_evidence(*, bucket: str, key: str) -> bytes:
+    """Download bytes from MinIO. Returns body on success.
+
+    Raises `ObjectNotFoundError` when the key is absent (`NoSuchKey`); other S3
+    errors surface as `StorageError`. Caller is responsible for parsing /
+    decoding the bytes.
+    """
+    with _client_lock:
+        client = _client()
+    try:
+        response = client.get_object(bucket_name=bucket, object_name=key)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+    except S3Error as exc:
+        if exc.code in {"NoSuchKey", "NoSuchObject"}:
+            msg = f"MinIO object {bucket}/{key} not found"
+            raise ObjectNotFoundError(msg) from exc
+        if exc.code == "NoSuchBucket":
+            msg = (
+                f"MinIO bucket {bucket!r} does not exist. "
+                "Run `python db/seeds/setup_minio.py` before sending traffic."
+            )
+            raise StorageError(msg) from exc
+        msg = f"MinIO download failed: {exc.code}: {exc.message}"
+        raise StorageError(msg) from exc
+
+
+__all__ = ["ObjectNotFoundError", "StorageError", "download_evidence", "upload_evidence"]

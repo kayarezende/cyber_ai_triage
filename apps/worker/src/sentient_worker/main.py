@@ -4,8 +4,8 @@ Wk 1: BLPOP loop + sentinel heartbeat + structured logging.
 Wk 4: parse the popped payload as `IngestJob` and run the wk-4 stub
 investigation in-process.
 Wk 5: stub replaced by `run_investigation` (Tier-1 triage via LLMRouter).
-Wk-6 will swap the body again for the LangGraph Tier-2 runner; this loop
-stays.
+Wk 9: second BLPOP key (`QUEUE_RESUMES`) drains analyst-decision jobs from
+the wk-9 web UI; dispatches to `resume_investigation`.
 """
 
 from __future__ import annotations
@@ -20,8 +20,14 @@ from typing import cast
 import redis
 from pydantic import ValidationError
 
-from sentient_common.jobs import QUEUE_INVESTIGATIONS, IngestJob
+from sentient_common.jobs import (
+    QUEUE_INVESTIGATIONS,
+    QUEUE_RESUMES,
+    IngestJob,
+    ResumeJob,
+)
 from sentient_common.logging import configure_logging, get_logger
+from sentient_orchestrator.investigation.runner import resume_investigation
 from sentient_orchestrator.runner import run_investigation
 from sentient_orchestrator.tracing import init_tracing
 
@@ -37,12 +43,12 @@ def _handle_signal(signum: int, _frame: FrameType | None) -> None:
     log.info("worker shutting down", signal=signum)
 
 
-def _process_payload(payload: bytes) -> None:
+def _process_ingest(payload: bytes) -> None:
     try:
         job = IngestJob.model_validate_json(payload)
     except ValidationError as exc:
         log.error(
-            "dropping malformed job",
+            "dropping malformed ingest job",
             payload_bytes=len(payload),
             errors=exc.errors(),
         )
@@ -62,11 +68,36 @@ def _process_payload(payload: bytes) -> None:
     job_log.info("investigation done", investigation_id=str(investigation_id))
 
 
+def _process_resume(payload: bytes) -> None:
+    try:
+        job = ResumeJob.model_validate_json(payload)
+    except ValidationError as exc:
+        log.error(
+            "dropping malformed resume job",
+            payload_bytes=len(payload),
+            errors=exc.errors(),
+        )
+        return
+
+    job_log = log.bind(
+        trace_id=job.trace_id,
+        investigation_id=str(job.investigation_id),
+        tenant_id=str(job.tenant_id),
+        approved=job.approved,
+    )
+    try:
+        rc = asyncio.run(resume_investigation(job))
+    except Exception:
+        job_log.exception("resume failed")
+        return
+    job_log.info("resume done", rc=rc)
+
+
 def main() -> int:
     init_tracing()
     url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     client = redis.Redis.from_url(url)
-    log.info("worker ready", queue=QUEUE_INVESTIGATIONS)
+    log.info("worker ready", queues=[QUEUE_INVESTIGATIONS, QUEUE_RESUMES])
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -75,13 +106,28 @@ def main() -> int:
         _SENTINEL.touch()
         result = cast(
             "tuple[bytes, bytes] | None",
-            client.blpop([QUEUE_INVESTIGATIONS], timeout=_BLPOP_TIMEOUT_SECONDS),
+            client.blpop(
+                [QUEUE_INVESTIGATIONS, QUEUE_RESUMES],
+                timeout=_BLPOP_TIMEOUT_SECONDS,
+            ),
         )
         if result is None:
             continue
-        _queue_name, payload = result
-        log.info("received job", payload_bytes=len(payload))
-        _process_payload(payload)
+        queue_raw, payload = result
+        queue_name = (
+            queue_raw.decode("utf-8") if isinstance(queue_raw, bytes) else queue_raw
+        )
+        log.info(
+            "received job",
+            queue=queue_name,
+            payload_bytes=len(payload),
+        )
+        if queue_name == QUEUE_INVESTIGATIONS:
+            _process_ingest(payload)
+        elif queue_name == QUEUE_RESUMES:
+            _process_resume(payload)
+        else:
+            log.error("unknown queue", queue=queue_name)
     return 0
 
 
