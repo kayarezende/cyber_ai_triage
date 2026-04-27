@@ -38,6 +38,9 @@ from sentient_api.routers.admin import (
     splunk_creds as admin_splunk_creds,
 )
 from sentient_api.routers.admin import (
+    usage as admin_usage,
+)
+from sentient_api.routers.admin import (
     users as admin_users,
 )
 from sentient_common.logging import configure_logging, get_logger
@@ -69,3 +72,4 @@ app.include_router(admin_hitl_policies.router)
 app.include_router(admin_budgets.router)
 app.include_router(admin_splunk_creds.router)
 app.include_router(admin_users.router)
+app.include_router(admin_usage.router)

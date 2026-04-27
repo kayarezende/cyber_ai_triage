@@ -9,6 +9,7 @@ const ITEMS = [
   { href: "/admin/budgets", label: "Budgets" },
   { href: "/admin/splunk", label: "Splunk" },
   { href: "/admin/users", label: "Users" },
+  { href: "/admin/usage", label: "Usage" },
 ];
 
 export function AdminNav() {

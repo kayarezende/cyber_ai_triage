@@ -199,3 +199,33 @@ export interface TenantUser {
 export interface TenantUserListResponse {
   items: TenantUser[];
 }
+
+export interface UsageRow {
+  month: string;
+  role: string;
+  model_requested: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  cost_usd: number;
+}
+
+export interface UsageStatusBreakdown {
+  status: string;
+  count: number;
+}
+
+export interface UsageSummary {
+  months_back: number;
+  total_attempts: number;
+  total_successes: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cached_tokens: number;
+  total_cost_usd: number;
+  rows: UsageRow[];
+  by_status: UsageStatusBreakdown[];
+}

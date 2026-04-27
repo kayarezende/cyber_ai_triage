@@ -597,8 +597,8 @@ _Wk-8 founder live-gates pending — same flow as wk-6/7:_
   - [x] `RequireAdmin` dep in `apps/api/src/sentient_api/deps.py` — survives unchanged into wk-11 Entra SSO.
 
 **Wk 11 — Quality iteration + Entra SSO**
-- [ ] Usage dashboard (tokens + cost + attempts by role by month) — backend + frontend, slipped from wk 10.
-- [ ] Triage eval failures → categorize (prompt / tool / schema / ambiguous label).
+- [x] Usage dashboard (tokens + cost + attempts by role by month) — backend `/api/admin/usage` (4 unit tests + live verified) + frontend `/admin/usage` (RangePicker, summary cards, status breakdown, usage table). Slipped from wk 10.
+- [ ] Triage eval failures → categorize (prompt / tool / schema / ambiguous label). Eval harness already has fail-bucket logic; this is the founder-driven categorization pass after labels land.
 - [ ] Prompt + rule tuning. Target ≥85% verdict, ≥0.70 MITRE F1.
 - [ ] **Entra ID SSO**: FastAPI OIDC + Next.js middleware. Dev bypass remains behind env flag.
 

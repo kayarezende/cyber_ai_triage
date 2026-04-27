@@ -91,10 +91,15 @@ def patch_admin_db(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "sentient_api.routers.admin.budgets",
         "sentient_api.routers.admin.splunk_creds",
         "sentient_api.routers.admin.users",
+        "sentient_api.routers.admin.usage",
     ):
         monkeypatch.setattr(f"{module}.tenant_session", fake_session)
-        if module != "sentient_api.routers.admin.llm_roles":
-            # llm_roles imports insert_audit_log too; path identical.
+        if module not in {
+            "sentient_api.routers.admin.llm_roles",
+            "sentient_api.routers.admin.usage",
+        }:
+            # llm_roles imports insert_audit_log too; usage is read-only and
+            # never writes audit rows. The patched fixture covers the rest.
             monkeypatch.setattr(f"{module}.insert_audit_log", fake_audit)
     monkeypatch.setattr(
         "sentient_api.routers.admin.llm_roles.insert_audit_log", fake_audit
@@ -582,3 +587,88 @@ def test_update_user_role_happy_path(
     assert r.json()["role"] == "admin"
     audits = patch_admin_db["audits"]
     assert audits and audits[0]["action"] == "admin_user_role_changed"
+
+
+# =====================================================================
+# usage
+# =====================================================================
+
+
+def test_usage_returns_aggregates(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    """Two execute calls: monthly aggregate + status breakdown."""
+    patch_admin_db["responses"] = [
+        # monthly aggregate rows
+        [
+            (
+                "2026-04-01",
+                "triage",
+                "google/gemini-3-flash-preview",
+                42,
+                40,
+                2,
+                12345,
+                6789,
+                1024,
+                0.052,
+            ),
+            (
+                "2026-04-01",
+                "investigation",
+                "anthropic/claude-opus-4-7",
+                8,
+                8,
+                0,
+                4096,
+                2048,
+                512,
+                0.140,
+            ),
+        ],
+        # status breakdown rows
+        [("success", 48), ("timeout", 2)],
+    ]
+    r = wk9_client.get(
+        "/api/admin/usage?months_back=3", headers=ADMIN_HEADERS
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["months_back"] == 3
+    assert body["total_attempts"] == 50
+    assert body["total_successes"] == 48
+    assert len(body["rows"]) == 2
+    assert body["rows"][0]["role"] == "triage"
+    assert body["rows"][0]["cost_usd"] == pytest.approx(0.052)
+    assert body["by_status"] == [
+        {"status": "success", "count": 48},
+        {"status": "timeout", "count": 2},
+    ]
+
+
+def test_usage_rejects_out_of_range_window(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    r = wk9_client.get(
+        "/api/admin/usage?months_back=99", headers=ADMIN_HEADERS
+    )
+    assert r.status_code == 422  # ge=1 le=24
+
+
+def test_usage_handles_empty_window(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    patch_admin_db["responses"] = [[], []]
+    r = wk9_client.get("/api/admin/usage", headers=ADMIN_HEADERS)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_attempts"] == 0
+    assert body["rows"] == []
+    assert body["by_status"] == []
+
+
+def test_usage_403_for_analyst(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    r = wk9_client.get("/api/admin/usage", headers=ANALYST_HEADERS)
+    assert r.status_code == 403
