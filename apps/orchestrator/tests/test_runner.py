@@ -113,9 +113,7 @@ def fake_conn() -> _FakeConn:
 
 
 @pytest.fixture
-def patch_session(
-    monkeypatch: pytest.MonkeyPatch, fake_conn: _FakeConn
-) -> _FakeConn:
+def patch_session(monkeypatch: pytest.MonkeyPatch, fake_conn: _FakeConn) -> _FakeConn:
     @contextmanager
     def session(_tid: UUID) -> Any:
         yield fake_conn
@@ -139,17 +137,13 @@ def audit_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 def patch_router(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Replace LLMRouter with a MagicMock so __init__ doesn't hit the DB."""
     instance = MagicMock()
-    monkeypatch.setattr(
-        runner_module, "LLMRouter", MagicMock(return_value=instance)
-    )
+    monkeypatch.setattr(runner_module, "LLMRouter", MagicMock(return_value=instance))
     return instance
 
 
 @pytest.fixture
 def patch_mitre(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        runner_module, "fetch_technique_descriptions", lambda _conn, _ids: {}
-    )
+    monkeypatch.setattr(runner_module, "fetch_technique_descriptions", lambda _conn, _ids: {})
 
 
 @pytest.fixture
@@ -276,13 +270,21 @@ async def test_escalates_on_high_severity(
     assert "SET status = 'done'" not in sql_blob
     # Investigation row updated with verdict='inconclusive' + reason.
     update_calls = [
-        params for sql, params in patch_session.queries
+        (sql, params)
+        for sql, params in patch_session.queries
         if "UPDATE investigations" in sql and "verdict" in sql
     ]
-    assert any(p.get("verdict") == "inconclusive" for p in update_calls)
-    assert any(
-        p.get("reason") == "tier_2_pending_wk6" for p in update_calls
-    )
+    assert any(p.get("verdict") == "inconclusive" for _, p in update_calls)
+    assert any(p.get("reason") == "tier_2_pending_wk6" for _, p in update_calls)
+    # DEFECT-1: escalated path MUST NOT set completed_at — Tier-2 owns it
+    # via cluster D's _claim_finalize. Pre-setting it here makes the atomic
+    # claim short-circuit on the happy path, leaving the LLM verdict +
+    # manifest unwritten and the audit chain missing investigation_complete.
+    for sql, params in update_calls:
+        assert (
+            "completed_at" not in sql
+        ), f"escalated UPDATE must not write completed_at; got: {sql}"
+        assert "completed_at" not in params
 
     actions = [a["action"] for a in audit_calls]
     assert "triage_escalated" in actions
@@ -359,9 +361,7 @@ async def test_fallback_exhausted_marks_inconclusive(
 ) -> None:
     _patch_run_triage(
         monkeypatch,
-        raises=FallbackChainExhausted(
-            role="triage", attempts=["model-a", "model-b"]
-        ),
+        raises=FallbackChainExhausted(role="triage", attempts=["model-a", "model-b"]),
     )
 
     investigation_id = await runner_module.run_investigation(_job())

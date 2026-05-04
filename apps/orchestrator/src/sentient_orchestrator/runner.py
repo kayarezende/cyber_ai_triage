@@ -60,12 +60,10 @@ async def run_investigation(job: IngestJob) -> UUID:
         # Status guard: only transition `new → triaging`. A re-delivered job
         # against an already-claimed incident is a no-op signal.
         result = conn.execute(
-            text(
-                """
+            text("""
                 UPDATE incidents SET status = 'triaging'
                 WHERE id = :id AND status = 'new'
-                """
-            ),
+                """),
             {"id": str(job.incident_id)},
         )
         if result.rowcount == 0:
@@ -166,7 +164,6 @@ async def run_investigation(job: IngestJob) -> UUID:
                 incident_id=job.incident_id,
                 tenant_id=job.tenant_id,
                 triage=triage,
-                completed_at=completed_at,
             )
             was_escalated = True
             log.info(
@@ -218,15 +215,13 @@ def _insert_investigation_row(
     started_at: datetime,
 ) -> None:
     conn.execute(
-        text(
-            """
+        text("""
             INSERT INTO investigations
                 (id, tenant_id, incident_id, started_at, severity, mitre_techniques)
             VALUES
                 (:id, :tenant_id, :incident_id, :started_at,
                  'info', CAST(:techniques AS text[]))
-            """
-        ),
+            """),
         {
             "id": str(investigation_id),
             "tenant_id": str(tenant_id),
@@ -275,15 +270,21 @@ def _finalize_escalated(
     incident_id: UUID,
     tenant_id: UUID,
     triage: TriageOutput,
-    completed_at: datetime,
 ) -> None:
+    """Persist triage placeholder + emit audit row for the escalated path.
+
+    Does NOT set ``completed_at`` — Tier-2 owns it via ``_claim_finalize``.
+    Setting it here would make Tier-2's atomic claim short-circuit on the
+    happy path, leaving the LLM verdict + manifest unwritten and the audit
+    chain missing its closing ``investigation_complete`` row.
+    """
     _update_investigation_with_triage(
         conn,
         investigation_id=investigation_id,
         triage=triage,
         verdict="inconclusive",
         inconclusive_reason="tier_2_pending_wk6",
-        completed_at=completed_at,
+        completed_at=None,
     )
     # incidents.status stays 'triaging' — wk-6 Tier-2 claims triaging rows.
     insert_audit_log(
@@ -307,8 +308,7 @@ def _finalize_fallback_exhausted(
     completed_at: datetime,
 ) -> None:
     conn.execute(
-        text(
-            """
+        text("""
             UPDATE investigations
             SET verdict = 'inconclusive',
                 severity = 'info',
@@ -317,8 +317,7 @@ def _finalize_fallback_exhausted(
                 inconclusive_reason = :reason,
                 completed_at = :completed_at
             WHERE id = :id
-            """
-        ),
+            """),
         {
             "id": str(investigation_id),
             "summary": "triage failed — analyst review needed",
@@ -347,11 +346,42 @@ def _update_investigation_with_triage(
     triage: TriageOutput,
     verdict: str,
     inconclusive_reason: str | None,
-    completed_at: datetime,
+    completed_at: datetime | None,
 ) -> None:
+    """Persist triage output to the investigations row.
+
+    ``completed_at`` is set ONLY for terminal triage outcomes (auto-benign,
+    fallback-exhausted, unexpected error). For the escalated path, callers
+    pass None — Tier-2 owns ``completed_at`` via cluster D's
+    ``_claim_finalize`` (atomic NULL→NOW() flip), and any pre-set value
+    silently breaks Tier-2 finalization (`_finalize_done` short-circuits,
+    the LLM verdict + manifest never persist).
+    """
+    if completed_at is None:
+        conn.execute(
+            text("""
+                UPDATE investigations
+                SET verdict = :verdict,
+                    severity = :severity,
+                    confidence = :confidence,
+                    summary = :summary,
+                    mitre_techniques = CAST(:techniques AS text[]),
+                    inconclusive_reason = :reason
+                WHERE id = :id
+                """),
+            {
+                "id": str(investigation_id),
+                "verdict": verdict,
+                "severity": triage.severity,
+                "confidence": round(triage.confidence / 100.0, 2),
+                "summary": triage.reasoning,
+                "techniques": _pg_text_array(triage.mitre_guesses),
+                "reason": inconclusive_reason,
+            },
+        )
+        return
     conn.execute(
-        text(
-            """
+        text("""
             UPDATE investigations
             SET verdict = :verdict,
                 severity = :severity,
@@ -361,8 +391,7 @@ def _update_investigation_with_triage(
                 inconclusive_reason = :reason,
                 completed_at = :completed_at
             WHERE id = :id
-            """
-        ),
+            """),
         {
             "id": str(investigation_id),
             "verdict": verdict,

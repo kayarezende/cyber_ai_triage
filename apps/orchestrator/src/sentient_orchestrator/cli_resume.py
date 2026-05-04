@@ -85,13 +85,22 @@ def _load_tenant_id(investigation_id: UUID) -> UUID:
 
     The CLI doesn't know the tenant ahead of time. The API path always does
     (the tenant is on `request.state.tenant_id` from middleware). This dev
-    helper bypasses RLS via the postgres role; production wk-9 path uses
-    `resume_investigation(job)` directly with `job.tenant_id` already set.
+    helper needs to read across tenants — it must connect as a role that
+    bypasses RLS. ``MIGRATION_DATABASE_URL`` (postgres superuser) is the
+    cluster-A canonical bypass DSN; ``DATABASE_URL`` since cluster A points
+    to ``app_runtime`` which DOES NOT bypass RLS, so a SELECT without
+    ``app.current_tenant`` set returns zero rows and the CLI prints
+    "investigation not found" for valid UUIDs.
+
+    Falls back to ``DATABASE_URL`` only when ``MIGRATION_DATABASE_URL`` is
+    unset (e.g. minimal CI) — that legacy path keeps the wk-8 dev hack
+    functional under non-cluster-A schemas.
     """
-    dsn = _strip_psycopg_dsn(os.environ.get("DATABASE_URL", ""))
-    if not dsn:
-        msg = "DATABASE_URL not set"
+    dsn_raw = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
+    if not dsn_raw:
+        msg = "MIGRATION_DATABASE_URL or DATABASE_URL must be set"
         raise RuntimeError(msg)
+    dsn = _strip_psycopg_dsn(dsn_raw)
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT tenant_id FROM investigations WHERE id = %s",
