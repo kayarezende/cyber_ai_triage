@@ -134,9 +134,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Re-download the STIX bundle even if cached.",
+        help="Re-download + upsert even if the table is already populated.",
     )
     args = parser.parse_args(argv)
+
+    dsn = _resolve_dsn()
+
+    # Fast path for warm restarts: if the table is already populated,
+    # skip the 50 MB STIX download. The compose `seed` sidecar runs on
+    # every `up`, so this saves ~30s once the cache exists. `--refresh`
+    # forces an upsert regardless (use after MITRE publishes new
+    # techniques upstream).
+    if not args.refresh:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM mitre_techniques")
+            existing = int((cur.fetchone() or [0])[0])
+        if existing >= 600:
+            print(f"mitre_techniques already populated ({existing} rows). skip.")
+            return 0
 
     bundle = _fetch(args.refresh)
     rows = _rows(bundle)
@@ -144,7 +159,6 @@ def main(argv: list[str] | None = None) -> int:
         print("no attack-pattern objects found — aborting", file=sys.stderr)
         return 1
 
-    dsn = _resolve_dsn()
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.executemany(_UPSERT_SQL, rows)
         cur.execute("SELECT COUNT(*) FROM mitre_techniques")

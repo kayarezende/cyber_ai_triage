@@ -32,11 +32,10 @@ services:
     restart: unless-stopped
 
   # One-shot migration runner. Runs `alembic upgrade head` then exits.
-  # api/orchestrator/worker `depends_on: migrate: service_completed_successfully`
-  # so they don't try to authenticate as `app_runtime` before the role exists
-  # (cluster A migration `e5f7a1b9c4d6` creates it). Idempotent — no-op when
-  # the DB is already at head. Shares the api image (alembic + db/migrations
-  # baked in there) so `docker compose build` doesn't double-build.
+  # `seed` chains after this so the schema + role + audit triggers exist
+  # before any seed touches the DB. Idempotent — no-op when the DB is
+  # already at head. Shares the api image (alembic + db/migrations baked
+  # in there) so `docker compose build` doesn't double-build.
   migrate:
     image: cyber-ai-triage-api
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
@@ -46,6 +45,30 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-sentient}
     depends_on:
       postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot seed runner. After `migrate` finishes the schema, this brings
+  # the DB + MinIO to a state where the app can actually serve traffic:
+  # checkpointer tables, evidence bucket, dev tenant, 691 MITRE techniques,
+  # default HITL policy, 10 detection rules. All seeds are idempotent;
+  # restart-on-`up` is a sub-second no-op when state already exists.
+  # api/orchestrator/worker `depends_on: seed:
+  # service_completed_successfully` so cold-start can't outrun the data.
+  seed:
+    image: cyber-ai-triage-api
+    command: ["/app/.venv/bin/python", "/app/db/seeds/seed_all.py"]
+    environment:
+      # Seeds need superuser perms (DDL-adjacent ops on global tables).
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET_EVIDENCE: ${MINIO_BUCKET_EVIDENCE:-evidence}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
         condition: service_healthy
     restart: "no"
 
@@ -113,7 +136,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET_EVIDENCE: ${MINIO_BUCKET_EVIDENCE:-evidence}
     depends_on:
-      migrate:
+      seed:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
@@ -147,7 +170,7 @@ services:
       # FastMCP mounts the streamable_http transport at /mcp.
       MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
     depends_on:
-      migrate:
+      seed:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
@@ -176,7 +199,7 @@ services:
       # Worker drives Tier-2 LangGraph; same MCP endpoint as the orchestrator.
       MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
     depends_on:
-      migrate:
+      seed:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy

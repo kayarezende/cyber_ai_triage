@@ -38,6 +38,13 @@ COPY apps/api ./apps/api
 COPY alembic.ini ./alembic.ini
 COPY db/migrations ./db/migrations
 
+# Seeds + their cache ride along too so the `seed` one-shot service can
+# bring a fresh DB to a fully usable state (checkpointer tables, evidence
+# bucket, dev tenant, 691 MITRE techniques, default HITL policy, 10
+# detection rules). Cache holds the MITRE STIX bundle so the sidecar
+# doesn't re-download from GitHub on every cold-start.
+COPY db/seeds ./db/seeds
+
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

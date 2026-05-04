@@ -1,0 +1,44 @@
+# Build hygiene — keep image layers small + cacheable.
+# Mirrors common .gitignore exclusions but applied to the Docker build context.
+
+# Python build / cache artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+*.egg-info/
+
+# Virtual envs (we build a fresh one inside the image)
+.venv/
+.tox/
+
+# Seed caches — re-fetched from upstream by the `seed` sidecar on first run.
+# 48 MB MITRE STIX bundle; baking it in would inflate the api image.
+db/seeds/cache/
+
+# Local dev / editor
+.git/
+.gitignore
+.env
+.envrc
+.vscode/
+.idea/
+*.swp
+*~
+
+# Frontend build output (web has its own Dockerfile)
+apps/web/.next/
+apps/web/node_modules/
+
+# Docs / planning files have no build relevance
+docs/
+tasks/
+evals/datasets/
+*.md
+!apps/web/README.md
+
+# Volumes / runtime data
+*.sqlite*
+*.log
