@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -33,7 +34,7 @@ def _ok_response(*, model: str = "google/gemini-3-flash-preview") -> OpenRouterR
         input_tokens=10,
         output_tokens=5,
         cached_tokens=0,
-        cost_usd=0.0001,
+        cost_usd=Decimal("0.0001"),
         latency_ms=42,
     )
 
@@ -320,6 +321,9 @@ async def test_fallback_exhausted_raises(
 async def test_schema_retry_succeeds_within_attempt(
     monkeypatch: pytest.MonkeyPatch, usage_calls: list[dict[str, Any]]
 ) -> None:
+    """Cluster C / CRIT-5: schema-retry HTTP call now writes its own usage
+    row at retry_seq=1. The primary failure also gets logged at retry_seq=0.
+    Pre-cluster-C this test asserted 1 row (only success); now expects 2."""
     _patch_loaders(monkeypatch, tenant_cfg=_tenant_cfg(), role_cfg=_role_cfg(primary="model-a"))
     calls = {"n": 0}
 
@@ -335,15 +339,23 @@ async def test_schema_retry_succeeds_within_attempt(
 
     assert calls["n"] == 2  # initial + 1 retry
     assert isinstance(result.parsed, _Out)
-    assert result.attempt_num == 1  # retry didn't increment
-    assert len(usage_calls) == 1
-    assert usage_calls[0]["status"] == "success"
+    assert result.attempt_num == 1  # retry didn't increment attempt_num
+    # Both the primary failure (retry_seq=0) and the retry success
+    # (retry_seq=1) are in the ledger now.
+    assert len(usage_calls) == 2
+    assert usage_calls[0]["status"] == "validation_fail"
+    assert usage_calls[0]["retry_seq"] == 0
+    assert usage_calls[1]["status"] == "success"
+    assert usage_calls[1]["retry_seq"] == 1
 
 
 @pytest.mark.asyncio
 async def test_schema_retry_fails_marks_validation_fail(
     monkeypatch: pytest.MonkeyPatch, usage_calls: list[dict[str, Any]]
 ) -> None:
+    """Cluster C / CRIT-5: model-a's primary AND its retry both fail with
+    response → both get usage rows (retry_seq=0 + retry_seq=1). Then model-b
+    succeeds. 3 rows total."""
     _patch_loaders(
         monkeypatch,
         tenant_cfg=_tenant_cfg(),
@@ -360,7 +372,12 @@ async def test_schema_retry_fails_marks_validation_fail(
     result = await router.call(role="triage", messages=[], response_schema=_Out)
 
     assert result.model_requested == "model-b"
-    assert [c["status"] for c in usage_calls] == ["validation_fail", "success"]
+    assert [c["status"] for c in usage_calls] == [
+        "validation_fail",
+        "validation_fail",
+        "success",
+    ]
+    assert [c["retry_seq"] for c in usage_calls] == [0, 1, 0]
 
 
 # ---------------------------------------------------------------- sovereignty
@@ -539,7 +556,7 @@ def _tool_call_response(
         input_tokens=20,
         output_tokens=10,
         cached_tokens=0,
-        cost_usd=0.0002,
+        cost_usd=Decimal("0.0002"),
         latency_ms=50,
         tool_calls=tool_calls or [],
     )
@@ -809,9 +826,16 @@ async def test_failed_attempt_with_response_accumulates_tokens(
     usage_calls: list[dict[str, Any]],
     accumulator_calls: list[dict[str, Any]],
 ) -> None:
-    """Wk-7 fix #2. A schema-validation-fail attempt that DID reach OpenRouter
-    consumed tokens — the cap accumulator must capture them, not just the
-    final success."""
+    """Wk-7 fix #2 + cluster C / CRIT-5. A schema-validation-fail attempt that
+    DID reach OpenRouter consumed tokens — the cap accumulator must capture
+    them, including the schema-retry sub-event inside ``_validate_with_retry``.
+
+    Pre-cluster-C this test asserted 2 accumulator calls (model-a primary +
+    model-b success) because the schema-retry HTTP call was unlogged. Post
+    cluster-C the retry sub-event has its own row + accumulator under
+    ``(attempt_num, retry_seq=1)``, so model-a alone produces TWO accumulator
+    calls.
+    """
     _patch_loaders(
         monkeypatch,
         tenant_cfg=_tenant_cfg(),
@@ -832,15 +856,30 @@ async def test_failed_attempt_with_response_accumulates_tokens(
         response_schema=_Out,
         investigation_id=inv_id,
     )
-    # Both attempts accumulate: first (validation_fail with response) + success.
-    assert len(accumulator_calls) == 2
-    # First call had token counts from `_bad_json_response`.
+    # 3 accumulator calls: model-a primary (retry_seq=0) + model-a retry
+    # sub-event (retry_seq=1, also fails schema with response) + model-b success.
+    assert len(accumulator_calls) == 3
+    # model-a primary failure had token counts from `_bad_json_response`.
     assert accumulator_calls[0]["input_tokens"] == 1
     assert accumulator_calls[0]["output_tokens"] == 1
     assert accumulator_calls[0]["cost_usd"] is None  # _bad_json_response has cost=None
-    # Second was the successful call.
-    assert accumulator_calls[1]["input_tokens"] == 10
-    assert accumulator_calls[1]["output_tokens"] == 5
+    # model-a retry sub-event also got `_bad_json_response` (same fake_call mock).
+    assert accumulator_calls[1]["input_tokens"] == 1
+    assert accumulator_calls[1]["output_tokens"] == 1
+    assert accumulator_calls[1]["cost_usd"] is None
+    # model-b success.
+    assert accumulator_calls[2]["input_tokens"] == 10
+    assert accumulator_calls[2]["output_tokens"] == 5
+
+    # Usage rows mirror: 5 in total — model-a primary fail + model-a retry
+    # fail (retry_seq=1) + model-b success (retry_seq=0). Plus model-a's
+    # outer _AttemptFailedError that surfaces from _validate_with_retry
+    # writes no extra row (the failure rows are written inside the retry
+    # method itself).
+    statuses = [c["status"] for c in usage_calls]
+    retry_seqs = [c.get("retry_seq", 0) for c in usage_calls]
+    assert statuses == ["validation_fail", "validation_fail", "success"]
+    assert retry_seqs == [0, 1, 0]
 
 
 @pytest.mark.asyncio
@@ -915,7 +954,7 @@ def test_update_investigation_totals_sql_clamps_negatives() -> None:
         investigation_id=uuid4(),
         input_tokens=-1000,  # Byzantine — must clamp.
         output_tokens=42,
-        cost_usd=-1.5,  # Byzantine — must clamp.
+        cost_usd=Decimal("-1.5"),  # Byzantine — must clamp.
     )
     sql = captured[0]
     # Three GREATEST clamps — one per accumulator column.
@@ -952,7 +991,7 @@ async def test_log_failure_with_response_kwarg_accumulates(
         input_tokens=77,
         output_tokens=33,
         cached_tokens=0,
-        cost_usd=0.0042,
+        cost_usd=Decimal("0.0042"),
         latency_ms=120,
     )
 
@@ -969,7 +1008,7 @@ async def test_log_failure_with_response_kwarg_accumulates(
     assert accumulator_calls[0]["investigation_id"] == inv_id
     assert accumulator_calls[0]["input_tokens"] == 77
     assert accumulator_calls[0]["output_tokens"] == 33
-    assert accumulator_calls[0]["cost_usd"] == pytest.approx(0.0042)
+    assert accumulator_calls[0]["cost_usd"] == Decimal("0.0042")
 
 
 @pytest.mark.asyncio

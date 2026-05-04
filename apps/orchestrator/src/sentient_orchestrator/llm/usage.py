@@ -13,6 +13,7 @@ the whole `usage` table on every call.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -41,23 +42,32 @@ def log_usage_attempt(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     cached_tokens: int | None = None,
-    cost_usd: float | None = None,
+    cost_usd: Decimal | None = None,
     openrouter_generation_id: str | None = None,
     latency_ms: int | None = None,
+    retry_seq: int = 0,
 ) -> None:
-    """INSERT one row into `usage`. RLS scoped via the caller's tenant_session."""
+    """INSERT one row into `usage`. RLS scoped via the caller's tenant_session.
+
+    ``retry_seq`` (cluster C / CRIT-5) — 0 = primary HTTP call, 1 = first
+    schema-retry within the same ``attempt_num``. Composite identity
+    ``(investigation_id, attempt_num, retry_seq)`` distinguishes the retry
+    sub-event per ADR-0015 §"Retry semantics".
+    """
     conn.execute(
         text("""
             INSERT INTO usage
                 (tenant_id, investigation_id, role, attempt_num,
                  model_requested, model_used, status,
                  input_tokens, output_tokens, cached_tokens,
-                 cost_usd, openrouter_generation_id, latency_ms)
+                 cost_usd, openrouter_generation_id, latency_ms,
+                 retry_seq)
             VALUES
                 (:tenant_id, :investigation_id, :role, :attempt_num,
                  :model_requested, :model_used, :status,
                  :input_tokens, :output_tokens, :cached_tokens,
-                 :cost_usd, :openrouter_generation_id, :latency_ms)
+                 :cost_usd, :openrouter_generation_id, :latency_ms,
+                 :retry_seq)
             """),
         {
             "tenant_id": str(tenant_id),
@@ -73,6 +83,7 @@ def log_usage_attempt(
             "cost_usd": cost_usd,
             "openrouter_generation_id": openrouter_generation_id,
             "latency_ms": latency_ms,
+            "retry_seq": retry_seq,
         },
     )
 
@@ -83,7 +94,7 @@ def update_investigation_totals(
     investigation_id: UUID,
     input_tokens: int | None,
     output_tokens: int | None,
-    cost_usd: float | None,
+    cost_usd: Decimal | None,
 ) -> None:
     """Atomically increment per-investigation cost + token totals.
 

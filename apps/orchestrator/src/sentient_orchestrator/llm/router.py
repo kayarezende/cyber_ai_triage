@@ -72,7 +72,12 @@ class _TenantConfig:
 
 @dataclass(frozen=True)
 class LLMResult:
-    """One successful LLM call's normalized output."""
+    """One successful LLM call's normalized output.
+
+    ``cost_usd`` is ``Decimal`` end-to-end inside the orchestrator (cluster C
+    / HIGH-8). Float conversion happens only at JSON emission boundaries
+    (evidence manifest).
+    """
 
     content: str
     parsed: BaseModel | None
@@ -82,7 +87,7 @@ class LLMResult:
     input_tokens: int
     output_tokens: int
     cached_tokens: int
-    cost_usd: float | None
+    cost_usd: Decimal | None
     latency_ms: int
     tool_calls: tuple[OpenRouterToolCall, ...] = ()
 
@@ -136,19 +141,28 @@ class LLMRouter:
             msg = f"LLM role {role!r} is disabled for tenant {self._tenant_id}"
             raise RuntimeError(msg)
 
-        # Wk-7: per-investigation cost + token cap gate. Single SELECT against
-        # the running totals on `investigations` (maintained by the post-attempt
-        # accumulator UPDATE below). NULL on either cap = disabled. Bounded
-        # single-call overshoot is acceptable; see BudgetExceeded docstring.
-        if investigation_id is not None and (
-            self._tenant_cfg.per_investigation_budget_usd is not None
-            or self._tenant_cfg.per_investigation_token_cap is not None
-        ):
-            self._check_budget(role=role, investigation_id=investigation_id)
+        # Wk-7: per-investigation cost + token cap gate. Reads running totals
+        # from `investigations` (maintained by the post-attempt accumulator
+        # UPDATE inside `_attempt` and `_log_failure`). NULL OR 0 on either
+        # cap = disabled (cluster C / MED-1). Cluster C / HIGH-6: re-checked
+        # at the top of every fallback iteration so a failure-with-response
+        # that pushed us over cap aborts the next iteration before spending
+        # more. Cluster C / HIGH-7: SELECT FOR UPDATE serialises concurrent
+        # callers on the same investigation_id (lock holds for txn lifetime).
+        budget_check_id: UUID | None = None
+        if investigation_id is not None:
+            cap_usd = self._tenant_cfg.per_investigation_budget_usd
+            token_cap = self._tenant_cfg.per_investigation_token_cap
+            cap_usd_active = cap_usd is not None and cap_usd > 0
+            token_cap_active = token_cap is not None and token_cap > 0
+            if cap_usd_active or token_cap_active:
+                budget_check_id = investigation_id
 
         models = [role_cfg.primary_model, *role_cfg.fallback_chain]
         async with httpx.AsyncClient() as client:
             for attempt_num, model in enumerate(models, start=1):
+                if budget_check_id is not None:
+                    self._check_budget(role=role, investigation_id=budget_check_id)
                 try:
                     return await self._attempt(
                         client=client,
@@ -263,74 +277,86 @@ class LLMRouter:
             )
             raise _AttemptFailedError("5xx") from None
 
-        # HTTP succeeded. Validate body if a schema was supplied.
+        # HTTP succeeded. Validate body if a schema was supplied. Cluster C
+        # / CRIT-5: when the schema-retry HTTP call fires, it writes its own
+        # usage row + accumulator UPDATE *inside* _validate_with_retry (so
+        # the retry's tokens land in the ledger and the cap gate). The
+        # `did_log` flag tells us whether to skip the caller-side log+accum
+        # below to avoid double-counting the primary failure row.
         parsed: BaseModel | None = None
+        winning_response: OpenRouterResponse = response
+        caller_must_log = True
         if response_schema is not None:
-            parsed_or_none = await self._validate_with_retry(
+            parsed_or_none, retry_response, retry_did_log = await self._validate_with_retry(
                 client=client,
                 model=model,
+                role=role,
                 role_cfg=role_cfg,
                 messages=messages,
                 response_format=response_format,
                 response=response,
                 response_schema=response_schema,
+                attempt_num=attempt_num,
+                investigation_id=investigation_id,
             )
             if parsed_or_none is None:
-                self._log_failure(
-                    attempt_num=attempt_num,
-                    model_requested=model,
-                    role=role,
-                    investigation_id=investigation_id,
-                    status="validation_fail",
-                    response=response,
-                )
+                # _validate_with_retry already logged the primary failure
+                # (retry_seq=0) and any retry sub-event (retry_seq=1).
+                # Caller does NOT re-log; just advance the fallback chain.
                 raise _AttemptFailedError("validation_fail") from None
             parsed = parsed_or_none
+            if retry_did_log:
+                # Retry path fully self-managed: ledger has primary fail
+                # row + retry success row, both accumulated. LLMResult is
+                # built from the retry response (it's the call that won).
+                caller_must_log = False
+                if retry_response is not None:
+                    winning_response = retry_response
 
-        log_usage_attempt(
-            self._conn,
-            tenant_id=self._tenant_id,
-            investigation_id=investigation_id,
-            role=role,
-            attempt_num=attempt_num,
-            model_requested=model,
-            model_used=response.model_used or model,
-            status="success",
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            cached_tokens=response.cached_tokens,
-            cost_usd=response.cost_usd,
-            openrouter_generation_id=response.generation_id,
-            latency_ms=response.latency_ms,
-        )
-        if investigation_id is not None:
-            # Mirror the per-attempt counters onto the investigations row so
-            # the budget gate can read O(1) instead of SUM-ing usage. Failed
-            # attempts also accumulate via `_log_failure` — see that method.
-            # Known gap: `_validate_with_retry` makes a second HTTP call
-            # within the same attempt that does NOT log a usage row, so its
-            # tokens + cost are not captured here either. Pre-existing wk-6
-            # issue; see tasks/lessons.md.
-            update_investigation_totals(
+        if caller_must_log:
+            log_usage_attempt(
                 self._conn,
+                tenant_id=self._tenant_id,
                 investigation_id=investigation_id,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                cost_usd=response.cost_usd,
+                role=role,
+                attempt_num=attempt_num,
+                model_requested=model,
+                model_used=winning_response.model_used or model,
+                status="success",
+                input_tokens=winning_response.input_tokens,
+                output_tokens=winning_response.output_tokens,
+                cached_tokens=winning_response.cached_tokens,
+                cost_usd=winning_response.cost_usd,
+                openrouter_generation_id=winning_response.generation_id,
+                latency_ms=winning_response.latency_ms,
+                retry_seq=0,
             )
+            if investigation_id is not None:
+                # Mirror the per-attempt counters onto the investigations row
+                # so the budget gate reads O(1) instead of SUM-ing `usage`.
+                # Failed attempts with a token-counted response accumulate
+                # via `_log_failure(response=...)`. Schema-retry sub-events
+                # accumulate inside `_validate_with_retry` (cluster C / CRIT-5).
+                update_investigation_totals(
+                    self._conn,
+                    investigation_id=investigation_id,
+                    input_tokens=winning_response.input_tokens,
+                    output_tokens=winning_response.output_tokens,
+                    cost_usd=winning_response.cost_usd,
+                )
 
         return LLMResult(
-            content=response.content,
+            content=winning_response.content,
             parsed=parsed,
             model_requested=model,
-            model_used=response.model_used or model,
+            model_used=winning_response.model_used or model,
             attempt_num=attempt_num,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            cached_tokens=response.cached_tokens,
-            cost_usd=response.cost_usd,
-            latency_ms=response.latency_ms,
-            tool_calls=tuple(response.tool_calls),
+            input_tokens=winning_response.input_tokens,
+            output_tokens=winning_response.output_tokens,
+            cached_tokens=winning_response.cached_tokens,
+            cost_usd=winning_response.cost_usd,
+            latency_ms=winning_response.latency_ms,
+            tool_calls=tuple(winning_response.tool_calls),
         )
 
     async def _validate_with_retry(
@@ -338,23 +364,53 @@ class LLMRouter:
         *,
         client: httpx.AsyncClient,
         model: str,
+        role: str,
         role_cfg: _RoleConfig,
         messages: list[dict[str, Any]],
         response_format: dict[str, Any] | None,
         response: OpenRouterResponse,
         response_schema: type[BaseModel],
-    ) -> BaseModel | None:
-        """Validate; retry once on failure with corrective message. Returns None on bail.
+        attempt_num: int,
+        investigation_id: UUID | None,
+    ) -> tuple[BaseModel | None, OpenRouterResponse | None, bool]:
+        """Validate; retry once on failure with corrective message.
+
+        Returns ``(parsed, winning_response, did_log)``:
+
+        * ``(parsed, None, False)`` — primary validated first try; caller logs.
+        * ``(parsed, retry_response, True)`` — retry succeeded; this method
+          logged the primary failure (``retry_seq=0, validation_fail``) AND
+          the retry success (``retry_seq=1, success``), accumulating both.
+          Caller must skip its own log+accum to avoid double-counting the
+          primary.
+        * ``(None, None, True)`` — both calls failed; this method logged
+          both rows. Caller raises ``_AttemptFailedError`` without re-logging.
 
         Auth failures (401/403) on the retry call propagate — same policy as
-        the initial attempt. Other HTTP / network errors collapse to None so
-        the outer loop classifies the attempt as `validation_fail` and tries
-        the next model.
+        the initial attempt. The primary failure row is in place before the
+        retry begins, so propagation does not lose the primary's audit row.
+
+        Cluster C / CRIT-5: every HTTP call writes its own usage row + runs
+        ``update_investigation_totals``. ADR-0015 §"Retry semantics" defines
+        the shared ``attempt_num`` + distinguishing ``retry_seq``.
         """
         try:
-            return response_schema.model_validate_json(response.content)
+            return response_schema.model_validate_json(response.content), None, False
         except ValidationError as exc:
             corrective_summary = _summarize_validation_errors(exc)
+
+        # Primary failed schema. Log it (retry_seq=0) + accumulate now —
+        # before the retry HTTP call — so a retry that also fails still
+        # leaves both rows in the ledger and both costs in the running total.
+        self._log_failure(
+            attempt_num=attempt_num,
+            model_requested=model,
+            role=role,
+            investigation_id=investigation_id,
+            status="validation_fail",
+            response=response,
+            retry_seq=0,
+        )
 
         retry_messages: list[dict[str, Any]] = [
             *messages,
@@ -383,24 +439,135 @@ class LLMRouter:
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (401, 403):
-                # Auth on retry — propagate so the operator sees it.
+                # Auth on retry — propagate so the operator sees it. The
+                # primary failure row is already written; no retry row
+                # (matches the primary attempt's auth-failure policy).
                 raise
-            return None
-        except (httpx.TimeoutException, httpx.RequestError):
-            return None
+            self._log_failure(
+                attempt_num=attempt_num,
+                model_requested=model,
+                role=role,
+                investigation_id=investigation_id,
+                status=_classify_http_status(exc.response.status_code),
+                response=None,
+                retry_seq=1,
+            )
+            return None, None, True
+        except httpx.TimeoutException:
+            self._log_failure(
+                attempt_num=attempt_num,
+                model_requested=model,
+                role=role,
+                investigation_id=investigation_id,
+                status="timeout",
+                response=None,
+                retry_seq=1,
+            )
+            return None, None, True
+        except httpx.RequestError:
+            # Catches ConnectError/ReadError/etc. — bucket as 5xx (closest
+            # enum value) so the retry sub-event still gets a row.
+            self._log_failure(
+                attempt_num=attempt_num,
+                model_requested=model,
+                role=role,
+                investigation_id=investigation_id,
+                status="5xx",
+                response=None,
+                retry_seq=1,
+            )
+            return None, None, True
+        except ValueError:
+            # Malformed retry response (no choices / bad tool_call args).
+            self._log_failure(
+                attempt_num=attempt_num,
+                model_requested=model,
+                role=role,
+                investigation_id=investigation_id,
+                status="validation_fail",
+                response=None,
+                retry_seq=1,
+            )
+            return None, None, True
 
         try:
-            return response_schema.model_validate_json(retry_response.content)
+            parsed = response_schema.model_validate_json(retry_response.content)
         except ValidationError:
-            return None
+            # Retry HTTP succeeded but body still failed schema. Tokens were
+            # spent — accumulate via _log_failure(response=...).
+            self._log_failure(
+                attempt_num=attempt_num,
+                model_requested=model,
+                role=role,
+                investigation_id=investigation_id,
+                status="validation_fail",
+                response=retry_response,
+                retry_seq=1,
+            )
+            return None, None, True
+
+        # Retry succeeded. Log retry row (retry_seq=1, success) +
+        # accumulator UPDATE so the cap gate sees the spend.
+        log_usage_attempt(
+            self._conn,
+            tenant_id=self._tenant_id,
+            investigation_id=investigation_id,
+            role=role,
+            attempt_num=attempt_num,
+            model_requested=model,
+            model_used=retry_response.model_used or model,
+            status="success",
+            input_tokens=retry_response.input_tokens,
+            output_tokens=retry_response.output_tokens,
+            cached_tokens=retry_response.cached_tokens,
+            cost_usd=retry_response.cost_usd,
+            openrouter_generation_id=retry_response.generation_id,
+            latency_ms=retry_response.latency_ms,
+            retry_seq=1,
+        )
+        if investigation_id is not None:
+            update_investigation_totals(
+                self._conn,
+                investigation_id=investigation_id,
+                input_tokens=retry_response.input_tokens,
+                output_tokens=retry_response.output_tokens,
+                cost_usd=retry_response.cost_usd,
+            )
+        return parsed, retry_response, True
 
     def _check_budget(self, *, role: str, investigation_id: UUID) -> None:
-        """Pre-call cap gate. Raise `BudgetExceeded` if any cap is exceeded."""
+        """Pre-call cap gate. Raise ``BudgetExceeded`` if any cap is exceeded.
+
+        Cluster C / HIGH-7: ``SELECT ... FOR UPDATE OF investigations`` locks
+        the row so concurrent callers on the same investigation_id serialize.
+        The lock holds for the calling transaction's lifetime — the
+        ``tenant_session`` block surrounding ``LLMRouter.call()`` may execute
+        many ``call()`` invocations; the lock is acquired on first call and
+        released when the outer txn commits. Two callers on the same
+        investigation_id will serialize; callers on different investigations
+        are unaffected (row-level lock).
+
+        Cluster C / MED-1: ``cap_usd == 0`` and ``token_cap == 0`` are
+        treated as "disabled," matching the project convention where 0 means
+        no limit. Admins editing ``tenants`` via the UI default to 0 (not
+        NULL) when setting "no cap" — the convention has to be enforced at
+        the read site, not just the write site.
+        """
+        cap_usd = self._tenant_cfg.per_investigation_budget_usd
+        token_cap = self._tenant_cfg.per_investigation_token_cap
+        cap_usd_active = cap_usd is not None and cap_usd > 0
+        token_cap_active = token_cap is not None and token_cap > 0
+        if not cap_usd_active and not token_cap_active:
+            # Both caps disabled. Defensive — caller-side outer gate also
+            # short-circuits, so reaching this branch is unusual.
+            return
+
         row = self._conn.execute(
             text("""
                 SELECT total_input_tokens, total_output_tokens, total_cost_usd
                   FROM investigations
                  WHERE id = :id
+                   FOR UPDATE OF investigations
                 """),
             {"id": str(investigation_id)},
         ).first()
@@ -409,13 +576,13 @@ class LLMRouter:
         total_in, total_out, total_cost = row
         total_tokens = int((total_in or 0) + (total_out or 0))
 
-        cap_usd = self._tenant_cfg.per_investigation_budget_usd
-        token_cap = self._tenant_cfg.per_investigation_token_cap
-
         usd_exceeded = (
-            cap_usd is not None and total_cost is not None and Decimal(total_cost) >= cap_usd
+            cap_usd is not None
+            and cap_usd > 0
+            and total_cost is not None
+            and Decimal(total_cost) >= cap_usd
         )
-        token_exceeded = token_cap is not None and total_tokens >= token_cap
+        token_exceeded = token_cap is not None and token_cap > 0 and total_tokens >= token_cap
         if usd_exceeded or token_exceeded:
             log.warning(
                 "per-investigation budget exceeded",
@@ -443,6 +610,7 @@ class LLMRouter:
         investigation_id: UUID | None,
         status: UsageStatus,
         response: OpenRouterResponse | None = None,
+        retry_seq: int = 0,
     ) -> None:
         log_usage_attempt(
             self._conn,
@@ -459,6 +627,7 @@ class LLMRouter:
             cost_usd=response.cost_usd if response else None,
             openrouter_generation_id=response.generation_id if response else None,
             latency_ms=response.latency_ms if response else None,
+            retry_seq=retry_seq,
         )
         if investigation_id is not None and response is not None:
             # Wk-7 fix: failed attempts that DID reach OpenRouter and got a

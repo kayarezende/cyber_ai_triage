@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -147,37 +148,73 @@ def test_load_tool_calls_hashes_results() -> None:
 # ------------------------------------------------------------ usage summary
 
 
-def test_load_usage_summary_aggregates_success_rows_only() -> None:
-    rows = [
-        ("triage", "model-a", "model-a", "success", 1, 100, 50, 20, 0.0010),
-        ("investigation", "model-b", "model-b", "5xx", 1, None, None, None, None),
-        ("investigation", "model-b", "model-b", "success", 2, 200, 80, 60, 0.0030),
-        ("review", "model-c", "model-c", "success", 1, 50, 25, 10, 0.0005),
-    ]
+def _usage_summary_conn(
+    *,
+    rows: list[tuple[Any, ...]],
+    sot_cost: Decimal | None,
+) -> MagicMock:
+    """Mock conn for _load_usage_summary's two execute() calls.
+
+    Cluster C: the function now issues TWO queries — first the per-attempt
+    SELECT on `usage` (returns 10 columns incl retry_seq), then a single
+    SELECT on `investigations.total_cost_usd` (the SoT for total cost).
+    """
     conn = MagicMock()
-    conn.execute.return_value.fetchall.return_value = rows
+    usage_result = MagicMock()
+    usage_result.fetchall.return_value = rows
+    sot_result = MagicMock()
+    sot_result.first.return_value = (sot_cost,) if sot_cost is not None else None
+    conn.execute.side_effect = [usage_result, sot_result]
+    return conn
+
+
+def test_load_usage_summary_aggregates_success_rows_only() -> None:
+    """Per-attempt rows feed token totals + attempts list; total cost comes
+    from the investigations.total_cost_usd SoT (cluster C)."""
+    rows = [
+        # role, model_req, model_used, status, attempt_num, in, out, cached, cost, retry_seq
+        ("triage", "model-a", "model-a", "success", 1, 100, 50, 20, Decimal("0.0010"), 0),
+        ("investigation", "model-b", "model-b", "5xx", 1, None, None, None, None, 0),
+        ("investigation", "model-b", "model-b", "success", 2, 200, 80, 60, Decimal("0.0030"), 0),
+        # Cluster C: a schema-retry sub-event under the same attempt_num.
+        ("investigation", "model-b", "model-b", "success", 2, 30, 10, 0, Decimal("0.0008"), 1),
+        ("review", "model-c", "model-c", "success", 1, 50, 25, 10, Decimal("0.0005"), 0),
+    ]
+    # SoT total includes ALL accumulated cost (both primary + retry sub-event
+    # rows accumulate inside the router); reflect that here.
+    sot_total = Decimal("0.0053")  # 0.0010 + 0.0030 + 0.0008 + 0.0005
+    conn = _usage_summary_conn(rows=rows, sot_cost=sot_total)
 
     token_usage, attempts = _load_usage_summary(conn, investigation_id=INV)
 
-    # Only success rows aggregate.
-    assert token_usage["input"] == 100 + 200 + 50
-    assert token_usage["output"] == 50 + 80 + 25
-    assert token_usage["cached"] == 20 + 60 + 10
-    assert token_usage["cost_usd"] == pytest.approx(0.0010 + 0.0030 + 0.0005, rel=1e-6)
-    # cache_hit_rate = 90 / 350
-    assert token_usage["cache_hit_rate"] == pytest.approx(round(90 / 350, 4))
-    # All rows (incl failure) present in attempts list.
-    assert len(attempts) == 4
-    assert [a["status"] for a in attempts] == ["success", "5xx", "success", "success"]
+    # Token totals still come from per-attempt rows — only `success` status counts.
+    assert token_usage["input"] == 100 + 200 + 30 + 50
+    assert token_usage["output"] == 50 + 80 + 10 + 25
+    assert token_usage["cached"] == 20 + 60 + 0 + 10
+    # Total cost is the SoT value, NOT a sum-from-usage. Cluster C / SoT shift.
+    assert token_usage["cost_usd"] == pytest.approx(0.0053, rel=1e-6)
+    # cache_hit_rate = 90 / 380
+    assert token_usage["cache_hit_rate"] == pytest.approx(round(90 / 380, 4))
+    # All rows (incl failure + retry sub-event) present in attempts list.
+    assert len(attempts) == 5
+    assert [a["status"] for a in attempts] == [
+        "success",
+        "5xx",
+        "success",
+        "success",
+        "success",
+    ]
+    # retry_seq is surfaced per-row for downstream UI.
+    assert [a["retry_seq"] for a in attempts] == [0, 0, 0, 1, 0]
 
 
 def test_load_usage_summary_empty_no_div_zero() -> None:
     """No usage rows yet (e.g. graph crashed before any LLM call)."""
-    conn = MagicMock()
-    conn.execute.return_value.fetchall.return_value = []
+    conn = _usage_summary_conn(rows=[], sot_cost=None)
     token_usage, attempts = _load_usage_summary(conn, investigation_id=INV)
     assert token_usage["input"] == 0
     assert token_usage["cache_hit_rate"] == 0.0
+    assert token_usage["cost_usd"] == 0.0
     assert attempts == []
 
 
@@ -185,7 +222,12 @@ def test_load_usage_summary_empty_no_div_zero() -> None:
 
 
 def _conn_for_manifest() -> MagicMock:
-    """Mock conn whose execute().fetchall() routes by SQL keyword."""
+    """Mock conn whose execute() routes by SQL keyword.
+
+    Cluster C: `_load_usage_summary` now issues TWO queries — the per-attempt
+    SELECT on `usage` (10 cols incl retry_seq) and a single SELECT on
+    `investigations.total_cost_usd` for the SoT total.
+    """
     conn = MagicMock()
 
     def _execute(stmt: Any, _params: Any = None) -> MagicMock:
@@ -204,8 +246,24 @@ def _conn_for_manifest() -> MagicMock:
             ]
         elif "FROM usage" in sql:
             result.fetchall.return_value = [
-                ("investigation", "m", "m", "success", 1, 100, 30, 10, 0.001),
+                # 10-col tuple: role, model_req, model_used, status, attempt_num,
+                # in_tok, out_tok, cached_tok, cost_usd, retry_seq.
+                (
+                    "investigation",
+                    "m",
+                    "m",
+                    "success",
+                    1,
+                    100,
+                    30,
+                    10,
+                    Decimal("0.001"),
+                    0,
+                ),
             ]
+        elif "FROM investigations" in sql:
+            # Cluster C SoT: total_cost_usd from the accumulator column.
+            result.first.return_value = (Decimal("0.001"),)
         else:
             result.fetchall.return_value = []
         return result

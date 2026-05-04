@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -45,7 +46,14 @@ class OpenRouterToolCall:
 
 @dataclass(frozen=True)
 class OpenRouterResponse:
-    """Parsed chat-completion response."""
+    """Parsed chat-completion response.
+
+    ``cost_usd`` is ``Decimal`` (cluster C / HIGH-8) — the boundary cast from
+    the JSON ``usage.cost`` float happens once here in ``_parse_response``
+    via ``Decimal(str(...))`` to avoid binary-float drift before binding to
+    NUMERIC(14,6) columns. Stays Decimal end-to-end inside the orchestrator;
+    only the JSON evidence manifest casts back to float at emission.
+    """
 
     content: str
     model_used: str
@@ -53,7 +61,7 @@ class OpenRouterResponse:
     input_tokens: int
     output_tokens: int
     cached_tokens: int
-    cost_usd: float | None
+    cost_usd: Decimal | None
     latency_ms: int
     tool_calls: list[OpenRouterToolCall] = field(default_factory=list)
 
@@ -202,8 +210,11 @@ def _parse_response(payload: dict[str, Any], *, latency_ms: int) -> OpenRouterRe
     details = usage.get("prompt_tokens_details") or {}
     if isinstance(details, dict):
         cached = int(details.get("cached_tokens", 0) or 0)
-    cost = usage.get("cost")
-    cost_usd: float | None = float(cost) if cost is not None else None
+    # Cluster C / HIGH-8: route via Decimal(str(...)) to avoid binary-float
+    # drift on NUMERIC binds. `cost` arrives as int / float / str depending
+    # on provider — str() coercion handles all three uniformly.
+    raw_cost = usage.get("cost")
+    cost_usd: Decimal | None = Decimal(str(raw_cost)) if raw_cost is not None else None
 
     return OpenRouterResponse(
         content=str(content),

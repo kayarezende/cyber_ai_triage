@@ -43,6 +43,31 @@ Contract requirements:
 - `FallbackChainExhausted` propagates to the LangGraph `draft_verdict` node; the investigation is marked `inconclusive`, `inconclusive_reason` is populated, and the dashboard card surfaces the attempt history.
 - Per-tenant sovereignty hooks: if `tenants.byo_openrouter_key_encrypted` is set, use that key. If `tenants.llm_region_constraint` is set, pass it through OpenRouter's `provider` filter. If `tenants.langsmith_enabled = false`, skip the `@traceable` wrapper. (See ADR-0016.)
 
+### Retry semantics (added 2026-05-04, cluster C / CRIT-5)
+
+Schema-validation retries inside `_validate_with_retry` are sub-events of the
+primary attempt against the same model. They share the parent `attempt_num`
+and are distinguished by `usage.retry_seq` (0 = primary HTTP call, 1 = first
+schema retry within the same attempt). Each retry HTTP call writes its own
+`usage` row and accumulates onto `investigations.total_cost_usd` / token
+totals — every LLM HTTP call is in the ledger and counts against the cap.
+
+Composite identity: `(investigation_id, attempt_num, retry_seq)`.
+
+Retries reuse the existing status enum — `success` / `validation_fail` /
+`5xx` / `timeout` / `rate_limited`. Auth failures (401/403) on a retry
+propagate without writing the retry's own row; the primary failure row is
+already in place by the time the retry begins, so the audit trail is intact.
+
+The pre-cluster-C gap (the retry HTTP call was uncosted and unaccumulated)
+allowed the per-investigation cap to be evaded indefinitely by triggering
+schema validation failures. Closing the gap also widened
+`usage.cost_usd` + `investigations.total_cost_usd` +
+`tenants.per_investigation_budget_usd` to `NUMERIC(14,6)` and routed cost
+parsing through `Decimal(str(...))` end-to-end (no float drift on NUMERIC
+binds). See cluster C migration `f2c8b6e1d34a` and
+`tasks/bug-fixes-2026-05-04/cluster-c-cost-cap.md`.
+
 ## Alternatives considered
 
 - **Keep OpenRouter native fallback + drop `attempt_num`/failure-status columns** — simpler schema, less code. Rejected: loses per-attempt audit, weakens compliance pitch.

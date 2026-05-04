@@ -83,4 +83,5 @@
 - LangSmith tracing config (MED-8 — wk-12 backlog)
 
 ## Carry-forward
-(Fill in if anything punted.)
+
+(none) — closed 2026-05-04. All 5 findings (CRIT-5, HIGH-6, HIGH-7, HIGH-8, MED-1) shipped in a single commit. Migration `f2c8b6e1d34a` widens cost columns + adds `usage.retry_seq`. ADR-0015 amended with "Retry semantics" subsection. Wk-7 lesson at `tasks/lessons.md` schema-retry-uncosted entry marked CLOSED in-place. New cluster-C lessons appended (4 rules). Live canary green; integration tests for FOR UPDATE serialisation + $1000 cost overflow + Decimal precision round-trip pass against the live compose Postgres. 648 unit tests + 4 cluster-C integration tests green.

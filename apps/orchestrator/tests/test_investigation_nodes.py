@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -62,7 +63,7 @@ def _llm_result(
         input_tokens=10,
         output_tokens=5,
         cached_tokens=0,
-        cost_usd=0.0001,
+        cost_usd=Decimal("0.0001"),
         latency_ms=42,
         tool_calls=tool_calls,
     )
@@ -763,7 +764,9 @@ async def test_apply_detection_rules_raises_severity_when_rule_overrides(
 ) -> None:
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
     monkeypatch.setattr(
-        nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [
+        nodes,
+        "load_enabled_rules_for_tenant",
+        lambda _c, _t: [
             DetectionRule(
                 id="r1",
                 name="ransomware_kill_chain",
@@ -772,25 +775,23 @@ async def test_apply_detection_rules_raises_severity_when_rule_overrides(
                 severity_override="critical",
                 enabled=True,
             )
-        ]
+        ],
     )
     monkeypatch.setattr(
-        nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [
+        nodes,
+        "evaluate_rules",
+        lambda _r, *, mitre_techniques: [
             _matched_rule("ransomware_kill_chain", override="critical")
-        ]
+        ],
     )
-    monkeypatch.setattr(
-        nodes, "effective_severity", lambda _agent, _matches: "critical"
-    )
+    monkeypatch.setattr(nodes, "effective_severity", lambda _agent, _matches: "critical")
 
     captured: list[tuple[str, dict[str, Any]]] = []
 
     def _track(_conn: object, **kwargs: Any) -> None:
         captured.append(("detection_rules_evaluated", kwargs))
 
-    monkeypatch.setattr(
-        nodes.audit, "emit_detection_rules_evaluated", _track
-    )
+    monkeypatch.setattr(nodes.audit, "emit_detection_rules_evaluated", _track)
 
     state = {
         "draft_verdict": {
@@ -814,12 +815,8 @@ async def test_apply_detection_rules_leaves_severity_when_no_match(
 ) -> None:
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
     monkeypatch.setattr(nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [])
-    monkeypatch.setattr(
-        nodes, "evaluate_rules", lambda _r, *, mitre_techniques: []
-    )
-    monkeypatch.setattr(
-        nodes, "effective_severity", lambda agent, _matches: agent
-    )
+    monkeypatch.setattr(nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [])
+    monkeypatch.setattr(nodes, "effective_severity", lambda agent, _matches: agent)
     monkeypatch.setattr(
         nodes.audit,
         "emit_detection_rules_evaluated",
@@ -845,7 +842,9 @@ async def test_apply_detection_rules_emits_audit_with_match_summary(
 ) -> None:
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
     monkeypatch.setattr(
-        nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [
+        nodes,
+        "load_enabled_rules_for_tenant",
+        lambda _c, _t: [
             DetectionRule(
                 id="r-floor",
                 name="valid_accounts_only",
@@ -854,25 +853,21 @@ async def test_apply_detection_rules_emits_audit_with_match_summary(
                 severity_override="low",
                 enabled=True,
             )
-        ]
+        ],
     )
     monkeypatch.setattr(
-        nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [
-            _matched_rule("valid_accounts_only", override="low")
-        ]
+        nodes,
+        "evaluate_rules",
+        lambda _r, *, mitre_techniques: [_matched_rule("valid_accounts_only", override="low")],
     )
-    monkeypatch.setattr(
-        nodes, "effective_severity", lambda agent, _matches: agent
-    )
+    monkeypatch.setattr(nodes, "effective_severity", lambda agent, _matches: agent)
 
     captured: list[tuple[str, dict[str, Any]]] = []
 
     def _track(_conn: object, **kwargs: Any) -> None:
         captured.append(("audit", kwargs))
 
-    monkeypatch.setattr(
-        nodes.audit, "emit_detection_rules_evaluated", _track
-    )
+    monkeypatch.setattr(nodes.audit, "emit_detection_rules_evaluated", _track)
 
     state = {
         "draft_verdict": {
@@ -899,9 +894,7 @@ async def test_apply_detection_rules_handles_empty_techniques(
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
     monkeypatch.setattr(nodes, "load_enabled_rules_for_tenant", lambda _c, _t: [])
     monkeypatch.setattr(nodes, "evaluate_rules", lambda _r, *, mitre_techniques: [])
-    monkeypatch.setattr(
-        nodes, "effective_severity", lambda agent, _matches: agent
-    )
+    monkeypatch.setattr(nodes, "effective_severity", lambda agent, _matches: agent)
     monkeypatch.setattr(
         nodes.audit,
         "emit_detection_rules_evaluated",

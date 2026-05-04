@@ -102,12 +102,26 @@ def _load_tool_calls(conn: Connection, *, investigation_id: UUID) -> list[dict[s
 def _load_usage_summary(
     conn: Connection, *, investigation_id: UUID
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Aggregate token + cost totals + per-attempt entries from `usage`."""
+    """Aggregate token + cost totals + per-attempt entries from ``usage``.
+
+    Cluster C: ``cost_usd`` total is sourced from the source-of-truth
+    ``investigations.total_cost_usd`` accumulator (the same column the
+    cap gate reads). The previous summed-from-`usage`-success-rows path
+    silently undercounted cost because schema-retry sub-events (CRIT-5)
+    weren't written to ``usage`` at all. Reading the SoT eliminates the
+    drift class entirely. ``float()`` cast at the JSON boundary —
+    ``json.dumps`` cannot serialize ``Decimal``.
+
+    Token totals stay summed from `usage` because the per-attempt
+    breakdown still has to come from the row-level data anyway, and the
+    `investigations` token columns DO include retry sub-events post-
+    cluster-C, so they would round-trip identically.
+    """
     rows = conn.execute(
         text("""
             SELECT role, model_requested, model_used, status,
                    attempt_num, input_tokens, output_tokens, cached_tokens,
-                   cost_usd
+                   cost_usd, retry_seq
               FROM usage
              WHERE investigation_id = :id
              ORDER BY id
@@ -115,7 +129,6 @@ def _load_usage_summary(
         {"id": str(investigation_id)},
     ).fetchall()
     total_in = total_out = total_cached = 0
-    total_cost = 0.0
     attempts: list[dict[str, Any]] = []
     for row in rows:
         (
@@ -128,13 +141,12 @@ def _load_usage_summary(
             out_tok,
             cached_tok,
             cost,
+            retry_seq,
         ) = row
         if status == "success":
             total_in += int(in_tok or 0)
             total_out += int(out_tok or 0)
             total_cached += int(cached_tok or 0)
-            if cost is not None:
-                total_cost += float(cost)
         attempts.append(
             {
                 "role": role,
@@ -142,9 +154,19 @@ def _load_usage_summary(
                 "model_used": model_used,
                 "status": status,
                 "attempt_num": attempt_num,
+                "retry_seq": int(retry_seq or 0),
+                # JSON boundary: cast Decimal → float for serialization.
                 "cost_usd": float(cost) if cost is not None else None,
             }
         )
+
+    # Source total cost from the accumulator (single source of truth).
+    sot_row = conn.execute(
+        text("SELECT total_cost_usd FROM investigations WHERE id = :id"),
+        {"id": str(investigation_id)},
+    ).first()
+    total_cost = float(sot_row[0]) if sot_row is not None and sot_row[0] is not None else 0.0
+
     cache_hit_rate = (total_cached / total_in) if total_in else 0.0
     token_usage = {
         "input": total_in,

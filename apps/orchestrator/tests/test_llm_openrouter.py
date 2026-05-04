@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -150,7 +151,8 @@ async def test_response_parses_usage_fields() -> None:
     assert response.input_tokens == 12
     assert response.output_tokens == 7
     assert response.cached_tokens == 4
-    assert response.cost_usd == pytest.approx(0.000123)
+    # Cluster C / HIGH-8: cost_usd is now Decimal end-to-end.
+    assert response.cost_usd == Decimal("0.000123")
     assert response.generation_id == "gen-abc-123"
     assert response.model_used == "google/gemini-3-flash-preview"
     assert response.latency_ms >= 0
