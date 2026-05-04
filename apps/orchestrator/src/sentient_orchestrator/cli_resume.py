@@ -95,6 +95,13 @@ def _load_tenant_id(investigation_id: UUID) -> UUID:
     Falls back to ``DATABASE_URL`` only when ``MIGRATION_DATABASE_URL`` is
     unset (e.g. minimal CI) — that legacy path keeps the wk-8 dev hack
     functional under non-cluster-A schemas.
+
+    Precedence caveat: if a dev exports ``MIGRATION_DATABASE_URL`` pointing
+    to a different cluster (e.g. staging) for a one-off migration task, the
+    bootstrap SELECT here will read from that cluster, NOT from whatever
+    ``DATABASE_URL`` points at. Symptom: "investigation not found" against
+    UUIDs that exist in the local DB. Unset ``MIGRATION_DATABASE_URL`` in
+    the shell that's running the CLI to recover.
     """
     dsn_raw = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
     if not dsn_raw:

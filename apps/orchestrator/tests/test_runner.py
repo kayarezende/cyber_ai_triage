@@ -217,6 +217,18 @@ async def test_auto_closes_on_low_severity(
     assert auto_close["details"]["severity"] == "low"
     assert auto_close["details"]["confidence"] == 85
 
+    # DEFECT-1 inverse: auto-benign IS terminal; the helper must still write
+    # completed_at on this path. If a future refactor accidentally passes
+    # None here (mirroring the escalation fix), the row stays open forever
+    # and the auto-close audit row points at a non-completed investigation.
+    update_calls = [
+        (sql, params)
+        for sql, params in patch_session.queries
+        if "UPDATE investigations" in sql and "verdict" in sql
+    ]
+    assert any("completed_at" in sql for sql, _ in update_calls)
+    assert any(p.get("completed_at") is not None for _, p in update_calls)
+
 
 @pytest.mark.asyncio
 async def test_auto_closes_on_info_severity(
@@ -373,6 +385,18 @@ async def test_fallback_exhausted_marks_inconclusive(
     assert audit is not None
     assert audit["details"]["attempts"] == ["model-a", "model-b"]
     assert isinstance(investigation_id, UUID)
+
+    # DEFECT-1 inverse: fallback-exhausted IS terminal — completed_at must
+    # be written. Different code path from auto-benign (uses an inline
+    # UPDATE in _finalize_fallback_exhausted, not the shared helper), so
+    # the assertion is independent.
+    update_calls = [
+        (sql, params)
+        for sql, params in patch_session.queries
+        if "UPDATE investigations" in sql and "verdict" in sql
+    ]
+    assert any("completed_at" in sql for sql, _ in update_calls)
+    assert any(p.get("completed_at") is not None for _, p in update_calls)
 
 
 # ---------------------------------------------------------------- helpers

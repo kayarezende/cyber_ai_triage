@@ -106,6 +106,31 @@ def test_raises_when_neither_set(monkeypatch: pytest.MonkeyPatch) -> None:
         cli_mod._load_tenant_id(INV)
 
 
+def test_empty_migration_falls_through_to_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`os.environ.get(...) or os.environ.get(...)` falsy-coerces "" — pin it.
+
+    A future reader might "tighten" the check to `is not None`, which would
+    silently regress this case (export MIGRATION_DATABASE_URL="" then expect
+    DATABASE_URL to win).
+    """
+    monkeypatch.setenv("MIGRATION_DATABASE_URL", "")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://app_runtime:pw@host/db",
+    )
+    used: dict[str, str] = {}
+
+    def fake_connect(dsn: str) -> _FakeConn:
+        used["dsn"] = dsn
+        return _FakeConn(dsn, (str(TENANT),))
+
+    monkeypatch.setattr(cli_mod.psycopg, "connect", fake_connect)
+    cli_mod._load_tenant_id(INV)
+    assert "app_runtime" in used["dsn"]
+
+
 def test_raises_when_investigation_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
