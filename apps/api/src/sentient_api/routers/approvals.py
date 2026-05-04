@@ -25,7 +25,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 import redis as redis_lib
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 
@@ -87,9 +87,23 @@ def submit_approval(
     body: ApprovalRequest,
     tenant_id: TenantId,
     settings: Annotated[Settings, Depends(get_settings)],
+    x_user_id: Annotated[str | None, Header(alias="x-user-id")] = None,
 ) -> ApprovalResponse:
     trace_id = uuid4().hex
-    analyst_id_str = str(body.analyst_id) if body.analyst_id else None
+    # Fall back to the auth middleware's `x-user-id` header when the body
+    # doesn't carry `analyst_id`. Without this, dev-bypass approvals (Web UI
+    # → server-action → apiFetch propagates x-user-id) record NULL approver,
+    # leaving `investigations.human_approved_by` perpetually unset. When
+    # wk-11 Entra SSO lands, the OIDC middleware sets the same header from
+    # the verified token — same fallback shape, no router change needed.
+    analyst_id_str: str | None = None
+    if body.analyst_id is not None:
+        analyst_id_str = str(body.analyst_id)
+    elif x_user_id:
+        try:
+            analyst_id_str = str(UUID(x_user_id))
+        except ValueError:
+            log.warning("ignoring malformed x-user-id header", value=x_user_id)
 
     # Cluster D HIGH-13: dedup + audit-row insert live in
     # `claim_resume_intent` so the CLI resume path goes through the same

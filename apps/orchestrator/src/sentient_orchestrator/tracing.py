@@ -53,7 +53,15 @@ def init_tracing() -> bool:
         return False
 
     if not _has_real_key():
-        log.info("langsmith disabled", reason="no_key")
+        # Tracing was explicitly requested but no real key is available —
+        # this is a misconfiguration, not a deliberate "off" state. Log at
+        # warning so the operator sees it on boot rather than discovering
+        # blank traces in the LangSmith UI mid-investigation.
+        log.warning(
+            "langsmith disabled despite LANGSMITH_TRACING=true; "
+            "set LANGSMITH_API_KEY or unset LANGSMITH_TRACING to silence",
+            reason="no_key",
+        )
         return False
 
     project = os.environ.get("LANGSMITH_PROJECT", "default")

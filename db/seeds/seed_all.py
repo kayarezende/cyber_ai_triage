@@ -10,10 +10,11 @@ Order matters:
     1. setup_checkpointer  — LangGraph checkpoint tables (independent)
     2. setup_minio         — evidence bucket (needs MinIO healthy)
     3. seed_tenants        — dev tenant row (FK target for everything else)
-    4. seed_mitre          — 691 MITRE techniques (referenced by detection rules)
-    5. seed_llm_role_config — per-tenant role config (FK to tenants)
-    6. seed_hitl_policies  — default 100% approval policy
-    7. seed_detection_rules — 10 global rules (validates against mitre_techniques)
+    4. seed_dev_user       — dev user (FK target for investigations.human_approved_by)
+    5. seed_mitre          — 691 MITRE techniques (referenced by detection rules)
+    6. seed_llm_role_config — per-tenant role config (FK to tenants)
+    7. seed_hitl_policies  — default 100% approval policy
+    8. seed_detection_rules — 10 global rules (validates against mitre_techniques)
 
 Fail-fast: if any step exits non-zero, abort with the same code so compose
 marks the service `service_completed_successfully` only on a clean run.
@@ -32,6 +33,7 @@ SCRIPTS: tuple[str, ...] = (
     "setup_checkpointer.py",
     "setup_minio.py",
     "seed_tenants.py",
+    "seed_dev_user.py",
     "seed_mitre.py",
     "seed_llm_role_config.py",
     "seed_hitl_policies.py",
