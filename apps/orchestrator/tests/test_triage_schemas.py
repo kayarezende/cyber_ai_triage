@@ -46,17 +46,41 @@ def test_confidence_rejects_above_one_hundred() -> None:
         TriageOutput(**kwargs)  # type: ignore[arg-type]
 
 
-def test_mitre_guesses_rejects_invalid_pattern() -> None:
+def test_mitre_guesses_drops_invalid_pattern_keeps_valid() -> None:
+    """DEFECT-4: drop-and-warn for malformed codes (matches Tier-2 cluster E MED-4).
+
+    Pre-fix: per-element ``Field(pattern=...)`` raised on the LLM's most common
+    shapes of bad output (`"TA0002"`, `"T1059.x"`, `" T1059;"`) and the entire
+    triage call was bucketed as `validation_fail` → schema-retry → eventually
+    fallback-exhausted → investigation marked inconclusive even though the
+    severity + reasoning were perfectly usable.
+    """
     kwargs = _ok_kwargs()
-    kwargs["mitre_guesses"] = ["TA0002"]  # tactic, not technique
-    with pytest.raises(ValidationError):
-        TriageOutput(**kwargs)  # type: ignore[arg-type]
+    kwargs["mitre_guesses"] = ["TA0002", "T1059.001", "T1059.x", "T1071"]
+    out = TriageOutput(**kwargs)  # type: ignore[arg-type]
+    assert out.mitre_guesses == ["T1059.001", "T1071"]
 
 
 def test_mitre_guesses_accepts_subtechnique() -> None:
     kwargs = _ok_kwargs()
     kwargs["mitre_guesses"] = ["T1059", "T1059.001"]
-    TriageOutput(**kwargs)  # type: ignore[arg-type]
+    out = TriageOutput(**kwargs)  # type: ignore[arg-type]
+    assert out.mitre_guesses == ["T1059", "T1059.001"]
+
+
+def test_mitre_guesses_dedupes_preserving_order() -> None:
+    kwargs = _ok_kwargs()
+    kwargs["mitre_guesses"] = ["T1059", "T1071", "T1059", "T1486"]
+    out = TriageOutput(**kwargs)  # type: ignore[arg-type]
+    assert out.mitre_guesses == ["T1059", "T1071", "T1486"]
+
+
+def test_mitre_guesses_drops_all_when_all_malformed() -> None:
+    """All-bad input degrades to empty list, not exception."""
+    kwargs = _ok_kwargs()
+    kwargs["mitre_guesses"] = ["bogus", "TA0002", ""]
+    out = TriageOutput(**kwargs)  # type: ignore[arg-type]
+    assert out.mitre_guesses == []
 
 
 def test_extra_field_forbidden() -> None:

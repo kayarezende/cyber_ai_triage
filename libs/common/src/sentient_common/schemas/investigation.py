@@ -24,7 +24,7 @@ log = get_logger(__name__)
 _MITRE_CODE_RE = re.compile(r"^T\d+(\.\d+)?$")
 
 
-def _validate_mitre_codes(values: list[str]) -> list[str]:
+def validate_mitre_codes(values: list[str]) -> list[str]:
     """Drop malformed T-codes + de-dupe preserving order; warn on drops.
 
     Cluster E MED-4: the LLM occasionally returns shapes like
@@ -90,7 +90,7 @@ class InvestigationOutput(BaseModel):
             "after deeper investigation."
         ),
     )
-    mitre_techniques: Annotated[list[str], AfterValidator(_validate_mitre_codes)] = Field(
+    mitre_techniques: Annotated[list[str], AfterValidator(validate_mitre_codes)] = Field(
         default_factory=list,
         description=(
             "Refined MITRE technique list. Removes Tier-1 guesses that "
@@ -166,4 +166,5 @@ __all__ = [
     "ReviewStatus",
     "Severity",
     "Verdict",
+    "validate_mitre_codes",
 ]

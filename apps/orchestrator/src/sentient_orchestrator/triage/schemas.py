@@ -14,8 +14,9 @@ from __future__ import annotations
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.functional_validators import AfterValidator
 
-from sentient_common.schemas.investigation import Severity
+from sentient_common.schemas.investigation import Severity, validate_mitre_codes
 
 
 class TriageOutput(BaseModel):
@@ -24,22 +25,30 @@ class TriageOutput(BaseModel):
     severity: Severity = Field(
         ...,
         description=(
-            "Confident severity. `info`/`low` auto-close benign; "
-            "`medium`+ escalates to Tier-2."
+            "Confident severity. `info`/`low` auto-close benign; " "`medium`+ escalates to Tier-2."
         ),
     )
     confidence: Annotated[int, Field(ge=0, le=100)] = Field(
         ...,
         description=(
-            "0-100 integer confidence. >=80 strong, 50-79 plausible, "
-            "<50 weak/ambiguous."
+            "0-100 integer confidence. >=80 strong, 50-79 plausible, " "<50 weak/ambiguous."
         ),
     )
-    mitre_guesses: list[Annotated[str, Field(pattern=r"^T\d+(\.\d+)?$")]] = Field(
+    # Drop-and-warn rather than strict-fail (matches Tier-2's
+    # `InvestigationOutput.mitre_techniques`, cluster E MED-4). Per-element
+    # `Field(pattern=...)` would raise on the LLM's most common shapes of
+    # malformed output (`"T1059.x"`, `" T1059;"`, empty strings) → router
+    # buckets the whole triage call as `validation_fail` → schema-retry
+    # burns ~1 LLM call → if both retries fail, fallback-exhausted marks
+    # the investigation inconclusive even though severity + reasoning were
+    # perfectly usable. The valid-subset path keeps the verdict shipping.
+    mitre_guesses: Annotated[list[str], AfterValidator(validate_mitre_codes)] = Field(
         default_factory=list,
         description=(
             "MITRE ATT&CK technique IDs the agent suspects (e.g. `T1059.001`). "
-            "Empty list when no technique applies."
+            "Empty list when no technique applies. Malformed codes are "
+            "dropped with a structured warning rather than rejecting the "
+            "whole triage payload."
         ),
     )
     entities_to_investigate: list[str] = Field(

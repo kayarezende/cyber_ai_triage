@@ -8,9 +8,13 @@ Usage:
         --output evals/reports/baseline-2026-04-30.html
 
 Env:
-    EVAL_API_BASE        default http://localhost:8000
-    DATABASE_URL         default postgresql://postgres:postgres@localhost:5432/sentient
-    INGEST_WEBHOOK_SECRET   required
+    EVAL_API_BASE              default http://localhost:8000
+    MIGRATION_DATABASE_URL     superuser DSN; required for cross-tenant SELECT
+                               (cluster A flipped DATABASE_URL to app_runtime,
+                               which respects RLS — see below). Falls back to
+                               DATABASE_URL only when MIGRATION isn't set.
+    DATABASE_URL               default postgresql://postgres:postgres@localhost:5432/sentient
+    INGEST_WEBHOOK_SECRET      required
 
 Exit codes:
     0  overall + verdict + MITRE thresholds met
@@ -45,6 +49,21 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 def _normalise_dsn(raw: str) -> str:
     """psycopg accepts the bare scheme; SQLAlchemy adds a +psycopg suffix."""
     return raw.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def _resolve_dsn() -> str:
+    """DEFECT-3: prefer ``MIGRATION_DATABASE_URL`` over ``DATABASE_URL``.
+
+    The eval poll runs an ad-hoc ``psycopg.connect`` (no `tenant_session`)
+    to read tenant-scoped tables. Cluster A flipped ``DATABASE_URL`` to the
+    RLS-respecting `app_runtime` role; without `app.current_tenant` set,
+    the SELECT silently returns zero rows and every incident "times out"
+    at the eval timeout regardless of agent quality. Mirrors the
+    cli_resume bootstrap fix (DEFECT-2). Falls back to ``DATABASE_URL``
+    only when MIGRATION isn't set (pre-cluster-A or minimal-CI).
+    """
+    raw = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get("DATABASE_URL", DEFAULT_DSN)
+    return _normalise_dsn(raw)
 
 
 def _check_env(secret: str) -> None:
@@ -123,7 +142,7 @@ def main() -> int:
         )
 
     api_base = os.environ.get("EVAL_API_BASE", DEFAULT_API_BASE)
-    dsn = _normalise_dsn(os.environ.get("DATABASE_URL", DEFAULT_DSN))
+    dsn = _resolve_dsn()
     secret = os.environ.get("INGEST_WEBHOOK_SECRET", "")
     _check_env(secret)
 
@@ -135,10 +154,7 @@ def main() -> int:
         print(f"ERROR: no rows in {args.dataset}", file=sys.stderr)
         return 2
 
-    print(
-        f"Running {len(incidents)} incident(s) against {api_base} "
-        f"(rubric={rubric_version})…"
-    )
+    print(f"Running {len(incidents)} incident(s) against {api_base} " f"(rubric={rubric_version})…")
     started_at = datetime.now(UTC)
     results = run_dataset(
         incidents,
