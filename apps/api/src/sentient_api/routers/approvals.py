@@ -21,7 +21,7 @@ is the same code path the wk-8 CLI hack drives (see ADR-0008 / wk-9 plan).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID, uuid4
 
 import redis as redis_lib
@@ -31,10 +31,10 @@ from sqlalchemy import text
 
 from sentient_api.deps import TenantId
 from sentient_api.settings import Settings, get_settings
-from sentient_common.audit import insert_audit_log
 from sentient_common.db import tenant_session
 from sentient_common.jobs import ResumeJob, enqueue_resume
 from sentient_common.logging import get_logger
+from sentient_common.resume import ResumeAlreadySubmitted, claim_resume_intent
 
 router = APIRouter(tags=["approvals"])
 log = get_logger(__name__)
@@ -90,59 +90,44 @@ def submit_approval(
 ) -> ApprovalResponse:
     trace_id = uuid4().hex
     analyst_id_str = str(body.analyst_id) if body.analyst_id else None
-    audit_details: dict[str, Any] = {
-        "approved": body.approved,
-        "analyst_id": analyst_id_str,
-        "notes_length": len(body.notes),
-        "trace_id": trace_id,
-    }
 
-    # Idempotency: a previously submitted decision lands as a
-    # `human_decision_submitted` audit row. The second submit observes the
-    # row inside the same tenant_session and returns 409. RLS already
-    # scopes the row to this tenant; the explicit tenant_id check is
-    # defence-in-depth.
+    # Cluster D HIGH-13: dedup + audit-row insert live in
+    # `claim_resume_intent` so the CLI resume path goes through the same
+    # gate. Pre-flight `approval_status` check stays here for clear 409s
+    # (`not_pending_approval` vs `decision_already_submitted`); the full
+    # row-locked dedup happens inside the helper.
     with tenant_session(tenant_id) as conn:
         row = conn.execute(
             text(
-                """
-                SELECT approval_status,
-                       EXISTS (
-                         SELECT 1 FROM audit_log
-                          WHERE investigation_id = :id
-                            AND action = 'human_decision_submitted'
-                       ) AS already_submitted
-                  FROM investigations
-                 WHERE id = :id AND tenant_id = :tenant_id
-                """
+                "SELECT approval_status FROM investigations "
+                "WHERE id = :id AND tenant_id = :tenant_id"
             ),
             {"id": str(investigation_id), "tenant_id": str(tenant_id)},
         ).first()
         if row is None:
-            raise HTTPException(
-                status_code=404, detail="investigation_not_found"
-            )
-        current_status, already_submitted = row[0], row[1]
-        if current_status != "pending":
+            raise HTTPException(status_code=404, detail="investigation_not_found")
+        if row[0] != "pending":
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "not_pending_approval",
-                    "approval_status": current_status,
+                    "approval_status": row[0],
                 },
             )
-        if already_submitted:
-            raise HTTPException(
-                status_code=409, detail="decision_already_submitted"
-            )
-        insert_audit_log(
-            conn,
-            tenant_id=tenant_id,
+    try:
+        claim_resume_intent(
             investigation_id=investigation_id,
+            tenant_id=tenant_id,
+            approved=body.approved,
+            analyst_id=analyst_id_str,
+            notes=body.notes,
             actor="api:approvals",
-            action="human_decision_submitted",
-            details=audit_details,
+            trace_id=trace_id,
         )
+    except ResumeAlreadySubmitted as exc:
+        raise HTTPException(status_code=409, detail="decision_already_submitted") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail="investigation_not_found") from exc
 
     job = ResumeJob(
         investigation_id=investigation_id,
@@ -163,30 +148,24 @@ def submit_approval(
         approved=body.approved,
         trace_id=trace_id,
     )
-    return ApprovalResponse(
-        investigation_id=investigation_id, queued=True, trace_id=trace_id
-    )
+    return ApprovalResponse(investigation_id=investigation_id, queued=True, trace_id=trace_id)
 
 
-@router.get(
-    "/api/approvals/pending", response_model=PendingApprovalsResponse
-)
+@router.get("/api/approvals/pending", response_model=PendingApprovalsResponse)
 def list_pending(
     tenant_id: TenantId,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> PendingApprovalsResponse:
     with tenant_session(tenant_id) as conn:
         rows = conn.execute(
-            text(
-                """
+            text("""
                 SELECT inv.id, inv.incident_id, inv.started_at, inv.severity,
                        inv.verdict, inv.summary, inv.review_status
                   FROM investigations inv
                  WHERE inv.approval_status = 'pending'
                  ORDER BY inv.started_at DESC NULLS LAST, inv.id DESC
                  LIMIT :limit
-                """
-            ),
+                """),
             {"limit": limit},
         ).all()
     return PendingApprovalsResponse(

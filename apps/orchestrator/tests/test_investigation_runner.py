@@ -109,6 +109,9 @@ class _FakeConn:
             return _Result(first=None)
         if "UPDATE incidents SET status = 'investigating'" in sql:
             return _Result(rowcount=self._claim_rowcount)
+        # Cluster D CRIT-6: finalize claim returns a row on first call.
+        if "completed_at IS NULL" in sql and "RETURNING id" in sql:
+            return _Result(first=("inv-id",), rowcount=1)
         return _Result(rowcount=1)
 
 

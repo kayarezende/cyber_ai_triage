@@ -288,6 +288,12 @@ async def tools_node(state: InvestigationState, config: RunnableConfig) -> dict[
     Sanitizes results before appending ToolMessages. Audits one row per call.
     Increments `tool_call_count` (already incremented by agent_node, so this
     is a no-op for the count — kept for symmetry).
+
+    Cluster D MED-5: skip any `tool_call_id` already in
+    `state.completed_tool_call_ids` — LangGraph re-invokes this node when
+    the graph resumes from a checkpoint; without the skip the same MCP
+    call + audit row fires twice. The id is appended (reducer
+    `operator.add`) only after a successful invoke + audit emit.
     """
     node_call_counts["tools"] += 1
     _maybe_inject_failure("tools")
@@ -302,8 +308,19 @@ async def tools_node(state: InvestigationState, config: RunnableConfig) -> dict[
     last = messages[-1]
     raw_calls = last.get("tool_calls") or [] if isinstance(last, dict) else []
 
+    done = set(state.get("completed_tool_call_ids") or [])
+    newly_completed: list[str] = []
+
     new_messages: list[dict[str, Any]] = []
     for tc in raw_calls:
+        tc_id = tc.get("id") or ""
+        if tc_id and tc_id in done:
+            log.debug(
+                "tools_node skipping already-completed tool_call",
+                investigation_id=str(investigation_id),
+                tool_call_id=tc_id,
+            )
+            continue
         function = tc.get("function") or {}
         name = function.get("name") or ""
         args_raw = function.get("arguments")
@@ -337,6 +354,8 @@ async def tools_node(state: InvestigationState, config: RunnableConfig) -> dict[
                     result_text=text,
                     latency_ms=0,
                 )
+            if tc_id:
+                newly_completed.append(tc_id)
             continue
 
         start = time.monotonic()
@@ -365,8 +384,13 @@ async def tools_node(state: InvestigationState, config: RunnableConfig) -> dict[
                 result_text=text,
                 latency_ms=latency_ms,
             )
+        if tc_id:
+            newly_completed.append(tc_id)
 
-    return {"messages": new_messages}
+    return {
+        "messages": new_messages,
+        "completed_tool_call_ids": newly_completed,
+    }
 
 
 async def correlate_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
@@ -743,25 +767,34 @@ async def await_approval_node(state: InvestigationState, config: RunnableConfig)
         }
 
     # Human approval required. Flip incident status BEFORE interrupt so the
-    # checkpoint captures post-flip state. UPDATE is idempotent on resume
-    # (no-op if already 'awaiting_approval').
+    # checkpoint captures post-flip state. Cluster D HIGH-14: gate UPDATEs on
+    # transition (status != 'awaiting_approval') and only emit the
+    # `awaiting_approval` audit on rowcount==1 — replay safety. Without the
+    # gate, every interrupt resume would re-emit the audit row.
     with tenant_session(tenant_id) as conn:
-        conn.execute(
-            text("UPDATE incidents SET status = 'awaiting_approval' WHERE id = :id"),
+        incidents_result = conn.execute(
+            text(
+                "UPDATE incidents SET status = 'awaiting_approval' "
+                "WHERE id = :id AND status IS DISTINCT FROM 'awaiting_approval'"
+            ),
             {"id": str(incident_id)},
         )
         conn.execute(
-            text("UPDATE investigations SET approval_status = 'pending' WHERE id = :id"),
+            text(
+                "UPDATE investigations SET approval_status = 'pending' "
+                "WHERE id = :id AND approval_status IS DISTINCT FROM 'pending'"
+            ),
             {"id": str(investigation_id)},
         )
-        audit.emit_awaiting_approval(
-            conn,
-            tenant_id=tenant_id,
-            investigation_id=investigation_id,
-            policy_id=policy_id,
-            policy_name=policy_name,
-            decision_ctx=ctx,
-        )
+        if incidents_result.rowcount == 1:
+            audit.emit_awaiting_approval(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                policy_id=policy_id,
+                policy_name=policy_name,
+                decision_ctx=ctx,
+            )
 
     resume_payload = interrupt(
         {
@@ -816,7 +849,10 @@ def _build_writeback_comment(
 
 
 def _build_writeback_event(
-    finding: Any, draft: dict[str, Any], investigation_id: UUID
+    finding: Any,
+    draft: dict[str, Any],
+    investigation_id: UUID,
+    verdict_revision: int,
 ) -> dict[str, Any]:
     """Render the OCSF Detection Finding HEC event payload.
 
@@ -824,6 +860,11 @@ def _build_writeback_event(
     Sentient verdict fields (already namespaced in `to_hec_dict()` via wk-2's
     `to_hec_dict` method, but we re-emit current draft values in case the
     review/detection-rules pass mutated severity).
+
+    Cluster D HIGH-9: `sentient_dedup_id = "{investigation_id}:{verdict_revision}"`
+    rides on every HEC event so future Splunk-side dedup transforms (or the
+    wk-12 reaper) can collapse re-fires onto a stable key. Today every
+    `verdict_revision` is 1; column exists for verdict-correction flows.
     """
     base = finding.to_hec_dict() if hasattr(finding, "to_hec_dict") else dict(finding)
     base["sentient_verdict"] = draft.get("verdict")
@@ -832,6 +873,7 @@ def _build_writeback_event(
     base["sentient_summary"] = (draft.get("summary") or "")[:1024]
     base["sentient_mitre_techniques"] = list(draft.get("mitre_techniques") or [])
     base["sentient_investigation_id"] = str(investigation_id)
+    base["sentient_dedup_id"] = f"{investigation_id}:{verdict_revision}"
     return base
 
 
@@ -923,6 +965,12 @@ async def writeback_node(state: InvestigationState, config: RunnableConfig) -> d
     Skipped path: when the analyst rejected the writeback
     (`approval_status='rejected'`), the verdict stays committed but neither
     Splunk surface is touched.
+
+    Cluster D HIGH-9 idempotency: read `writeback_status` first. If it's
+    already `'succeeded'` we short-circuit BEFORE any HEC / notable_update
+    side effect — wk-12 reaper can re-fire a finalize on a successful run
+    without double-posting. The `sentient_dedup_id` field on the HEC event
+    is a stable key for Splunk-side dedup transforms (deferred).
     """
     node_call_counts["writeback"] += 1
     _maybe_inject_failure("writeback")
@@ -933,6 +981,23 @@ async def writeback_node(state: InvestigationState, config: RunnableConfig) -> d
     tools: list[BaseTool] = configurable["tools"]
     finding = configurable["finding"]
     draft = state.get("draft_verdict") or {}
+
+    # Cluster D HIGH-9: idempotency guard + verdict_revision lookup. Read
+    # both in one round-trip; row missing here is treated like other
+    # writeback misconfig — let downstream loader raise.
+    with tenant_session(tenant_id) as conn:
+        inv_row = conn.execute(
+            text("SELECT writeback_status, verdict_revision " "FROM investigations WHERE id = :id"),
+            {"id": str(investigation_id)},
+        ).first()
+    prior_writeback_status = inv_row[0] if inv_row else None
+    verdict_revision = int(inv_row[1]) if inv_row and inv_row[1] is not None else 1
+    if prior_writeback_status == "succeeded":
+        log.info(
+            "writeback already succeeded; short-circuit",
+            investigation_id=str(investigation_id),
+        )
+        return {"writeback_status": "succeeded"}
 
     if state.get("approval_status") == "rejected":
         with tenant_session(tenant_id) as conn:
@@ -980,7 +1045,7 @@ async def writeback_node(state: InvestigationState, config: RunnableConfig) -> d
             "writeback_attempts": [miss_attempt],
         }
 
-    event = _build_writeback_event(finding, draft, investigation_id)
+    event = _build_writeback_event(finding, draft, investigation_id, verdict_revision)
 
     with tenant_session(tenant_id) as conn:
         audit.emit_writeback_attempted(

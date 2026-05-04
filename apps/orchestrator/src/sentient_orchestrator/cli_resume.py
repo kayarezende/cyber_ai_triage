@@ -33,7 +33,9 @@ import psycopg
 from sentient_common.jobs import ResumeJob
 from sentient_common.logging import configure_logging, get_logger
 from sentient_orchestrator.investigation.runner import (
+    ResumeAlreadySubmitted,
     _strip_psycopg_dsn,
+    claim_resume_intent,
     resume_investigation,
 )
 
@@ -118,6 +120,29 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     tenant_id = _load_tenant_id(investigation_id)
+    trace_id = uuid4().hex
+
+    # Cluster D HIGH-13: dedup + audit-row insert via the shared helper
+    # the API path uses. Without this, the CLI could resume an
+    # investigation a second analyst had already decided through the web
+    # UI, and no `human_decision_submitted` audit row would record it.
+    try:
+        claim_resume_intent(
+            investigation_id=investigation_id,
+            tenant_id=tenant_id,
+            approved=args.approve,
+            analyst_id=args.analyst_id,
+            notes=args.notes,
+            actor="cli:resume",
+            trace_id=trace_id,
+        )
+    except ResumeAlreadySubmitted:
+        print(
+            f"decision already submitted for {investigation_id}",
+            file=sys.stderr,
+        )
+        return 3
+
     job = ResumeJob(
         investigation_id=investigation_id,
         tenant_id=tenant_id,
@@ -125,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         analyst_id=args.analyst_id,
         notes=args.notes,
         enqueued_at=datetime.now(UTC),
-        trace_id=uuid4().hex,
+        trace_id=trace_id,
     )
     return asyncio.run(resume_investigation(job))
 

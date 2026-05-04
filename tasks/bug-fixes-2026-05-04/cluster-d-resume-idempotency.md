@@ -79,5 +79,7 @@
 - Sanitizer limits (cluster E)
 - Cross-process crash-resume reaper (wk-12 backlog per CLAUDE.md)
 
-## Carry-forward
-(Fill in if anything punted.)
+## Carry-forward (2026-05-04 close-out)
+- **None of the spec is punted.** All 5 findings landed (CRIT-6 + HIGH-9 + HIGH-13 + HIGH-14 + MED-5).
+- **Caveat captured in lessons.md** (not a deferral, a scope clarification): MED-5's `completed_tool_call_ids` only protects between-node crashes. Mid-`tools_node` worker death after a partial loop still re-fires the in-flight call until LangGraph checkpoints. This matches the spec scope ("between-node crashes + double-resume"); deeper protection (per-tool-call sub-graph or external dedup table) is wk-12 reaper territory.
+- **Refactor during execution** (still in-spec): `claim_resume_intent` + `ResumeAlreadySubmitted` were extracted to `libs/common/src/sentient_common/resume.py` rather than living in `apps/orchestrator/.../investigation/runner.py`. Reason: the API container does not depend on the orchestrator package, so the original in-runner placement broke API container boot. Runner re-exports the symbols for backward compat. Lessons.md doesn't capture this — it's plumbing, not a generalizable rule.

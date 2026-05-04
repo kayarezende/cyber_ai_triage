@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID
@@ -33,6 +32,7 @@ from sqlalchemy.engine import Connection
 from sentient_common.db import tenant_session
 from sentient_common.jobs import ResumeJob
 from sentient_common.logging import get_logger
+from sentient_common.resume import ResumeAlreadySubmitted, claim_resume_intent
 from sentient_ocsf.detection_finding import (
     DetectionFinding,
     validate_detection_finding,
@@ -142,6 +142,7 @@ async def run_tier2_investigation(
         "triage_reasoning": triage_ctx.get("reasoning", "") or "",
         "tool_call_count": 0,
         "draft_verdict": None,
+        "completed_tool_call_ids": [],
     }
 
     try:
@@ -261,6 +262,32 @@ def _is_interrupted(final_state: Any) -> bool:
     return False
 
 
+def _claim_finalize(investigation_id: UUID, tenant_id: UUID) -> bool:
+    """Atomic finalize-claim. Cluster D CRIT-6.
+
+    `UPDATE … WHERE completed_at IS NULL RETURNING id` is the only safe
+    pattern for "exactly-once finalize" under crash + double-resume. Two
+    concurrent `_finalize_after_graph` calls (e.g., the wk-12 reaper firing
+    a stale Redis job alongside a fresh one) race for the row; only the
+    UPDATE that flips `completed_at` from NULL to NOW() returns a row.
+
+    The loser short-circuits — every post-graph side effect (verdict
+    UPDATE, review UPDATE, status flip, completion audit, manifest upload)
+    is gated on the claim. The verdict columns themselves no longer write
+    `completed_at` — the claim owns it.
+    """
+    with tenant_session(tenant_id) as conn:
+        row = conn.execute(
+            text(
+                "UPDATE investigations SET completed_at = NOW() "
+                "WHERE id = :id AND completed_at IS NULL "
+                "RETURNING id"
+            ),
+            {"id": str(investigation_id)},
+        ).first()
+    return row is not None
+
+
 async def _finalize_after_graph(
     *,
     investigation_id: UUID,
@@ -272,7 +299,8 @@ async def _finalize_after_graph(
     """Finalize after the graph has run to completion (no interrupt).
 
     Called from both `run_tier2_investigation` (initial) and `cli_resume.py`
-    (after `Command(resume=...)`).
+    (after `Command(resume=...)`). Cluster D CRIT-6: atomic claim guards
+    every side effect; second resume short-circuits cleanly.
     """
     draft = final_state.get("draft_verdict") if final_state else None
     if not draft:
@@ -283,6 +311,13 @@ async def _finalize_after_graph(
             error_type="MissingVerdict",
             error_message="graph completed without a draft verdict",
             reason="no_verdict_emitted",
+        )
+        return
+
+    if not _claim_finalize(investigation_id, tenant_id):
+        log.info(
+            "tier-2 finalize already claimed; short-circuit",
+            investigation_id=str(investigation_id),
         )
         return
 
@@ -418,13 +453,11 @@ async def _finalize_done(
     writeback_attempts: list[dict[str, Any]] | None = None,
     detection_rule_matches: list[dict[str, Any]] | None = None,
 ) -> None:
-    completed_at = datetime.now(UTC)
     with tenant_session(tenant_id) as conn:
         _update_investigation_with_verdict(
             conn,
             investigation_id=investigation_id,
             verdict=verdict,
-            completed_at=completed_at,
         )
         if review is not None:
             _update_investigation_with_review(
@@ -464,20 +497,27 @@ async def _finalize_inconclusive(
     error_message: str,
     reason: str,
 ) -> None:
-    completed_at = datetime.now(UTC)
+    """Cluster D CRIT-6: claim first (sets `completed_at`); skip if already
+    finalized. Verdict-row UPDATE no longer writes `completed_at` — claim
+    owns it. Status flip + audit emit run only inside the claim."""
+    if not _claim_finalize(investigation_id, tenant_id):
+        log.info(
+            "tier-2 finalize_inconclusive already claimed; short-circuit",
+            investigation_id=str(investigation_id),
+            reason=reason,
+        )
+        return
     with tenant_session(tenant_id) as conn:
         conn.execute(
             text("""
                 UPDATE investigations
                    SET verdict = 'inconclusive',
-                       inconclusive_reason = :reason,
-                       completed_at = :completed_at
+                       inconclusive_reason = :reason
                  WHERE id = :id
                 """),
             {
                 "id": str(investigation_id),
                 "reason": reason,
-                "completed_at": completed_at,
             },
         )
         conn.execute(
@@ -499,8 +539,10 @@ def _update_investigation_with_verdict(
     *,
     investigation_id: UUID,
     verdict: InvestigationOutput,
-    completed_at: datetime,
 ) -> None:
+    """Cluster D CRIT-6: `completed_at` is owned by `_claim_finalize`. The
+    atomic claim sets it from NULL → NOW() exactly once; the verdict UPDATE
+    must NOT touch it (would defeat the claim's idempotency guard)."""
     conn.execute(
         text("""
             UPDATE investigations
@@ -510,8 +552,7 @@ def _update_investigation_with_verdict(
                    mitre_techniques = CAST(:techniques AS text[]),
                    summary = :summary,
                    ocsf_output = CAST(:ocsf AS jsonb),
-                   inconclusive_reason = NULL,
-                   completed_at = :completed_at
+                   inconclusive_reason = NULL
              WHERE id = :id
             """),
         {
@@ -522,7 +563,6 @@ def _update_investigation_with_verdict(
             "techniques": _pg_text_array(verdict.mitre_techniques),
             "summary": verdict.summary,
             "ocsf": json.dumps(verdict.model_dump()),
-            "completed_at": completed_at,
         },
     )
 
@@ -754,6 +794,13 @@ async def resume_investigation(job: ResumeJob) -> int:
 
     Returns 0 on clean completion, 2 if the graph re-entered an interrupted
     state (shouldn't happen with a single approval node — defensive log).
+
+    Cluster D HIGH-13 contract: the caller (API submit handler or CLI) is
+    responsible for `claim_resume_intent` BEFORE invoking this function.
+    `resume_investigation` does NOT re-claim — that would always raise on
+    the API path (worker re-runs the job after the API already claimed).
+    The intent audit row is the source of truth for "this decision is
+    in-flight."
     """
     investigation_id = job.investigation_id
     tenant_id = job.tenant_id
@@ -813,4 +860,9 @@ async def resume_investigation(job: ResumeJob) -> int:
     return 0
 
 
-__all__ = ["resume_investigation", "run_tier2_investigation"]
+__all__ = [
+    "ResumeAlreadySubmitted",
+    "claim_resume_intent",
+    "resume_investigation",
+    "run_tier2_investigation",
+]

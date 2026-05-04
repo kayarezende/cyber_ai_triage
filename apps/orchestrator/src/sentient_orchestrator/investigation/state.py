@@ -94,6 +94,16 @@ class InvestigationState(TypedDict, total=False):
     writeback_status: Literal["pending", "succeeded", "failed", "skipped"]
     writeback_attempts: list[dict[str, Any]]
 
+    # Cluster D MED-5. Tool-call idempotency key set. `tools_node` skips any
+    # `tool_call_id` it has already invoked + audited; LangGraph checkpoints
+    # the appended ids after each successful node return so a same-process
+    # double-resume (graph crashed in correlate, restart re-enters the prior
+    # tools_node checkpoint) doesn't double-fire MCP calls or duplicate
+    # `tool_call` audit rows. Reducer is `operator.add` (list append). NB:
+    # only protects between-node crashes; mid-tools_node crashes still
+    # double-fire the in-flight call until checkpointed (wk-12 reaper).
+    completed_tool_call_ids: Annotated[list[str], operator.add]
+
 
 __all__ = [
     "MAX_TOOL_CALLS",

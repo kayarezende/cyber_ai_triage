@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
@@ -26,9 +25,36 @@ INC = UUID("33333333-3333-3333-3333-333333333333")
 POLICY_ID = UUID("44444444-4444-4444-4444-444444444444")
 
 
+class _Result:
+    def __init__(self, rowcount: int = 1) -> None:
+        self.rowcount = rowcount
+
+    def first(self) -> tuple[Any, ...] | None:
+        return None
+
+
+class _Conn:
+    """Records execute() calls and reports rowcount=1 on the gated UPDATEs.
+
+    Cluster D HIGH-14 gates `awaiting_approval` audit emit on UPDATE
+    rowcount==1. The MagicMock fake previously used here yields
+    `result.rowcount == MagicMock()` which is never == 1; that would
+    silently suppress every audit emit in this file's tests.
+    """
+
+    def __init__(self, rowcount_for_updates: int = 1) -> None:
+        self._rowcount = rowcount_for_updates
+        self.queries: list[tuple[str, dict[str, Any]]] = []
+
+    def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _Result:
+        sql = str(getattr(stmt, "text", stmt))
+        self.queries.append((sql, params or {}))
+        return _Result(rowcount=self._rowcount)
+
+
 @contextmanager
 def _fake_session(_tenant_id: UUID) -> Any:
-    yield MagicMock()
+    yield _Conn()
 
 
 @pytest.fixture(autouse=True)
@@ -66,12 +92,8 @@ def patched(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(nodes, "evaluate_policy", _check_policy)
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
     monkeypatch.setattr(nodes, "interrupt", _interrupt)
-    monkeypatch.setattr(
-        nodes.audit, "emit_awaiting_approval", _track_audit("awaiting_approval")
-    )
-    monkeypatch.setattr(
-        nodes.audit, "emit_approval_received", _track_audit("approval_received")
-    )
+    monkeypatch.setattr(nodes.audit, "emit_awaiting_approval", _track_audit("awaiting_approval"))
+    monkeypatch.setattr(nodes.audit, "emit_approval_received", _track_audit("approval_received"))
     return captured
 
 

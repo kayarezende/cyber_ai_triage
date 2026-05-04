@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
@@ -26,9 +25,38 @@ INV = UUID("22222222-2222-2222-2222-222222222222")
 INC = UUID("33333333-3333-3333-3333-333333333333")
 
 
+class _Result:
+    def __init__(self, *, first: tuple[Any, ...] | None = None, rowcount: int = 1) -> None:
+        self._first = first
+        self.rowcount = rowcount
+
+    def first(self) -> tuple[Any, ...] | None:
+        return self._first
+
+
+class _Conn:
+    """Cluster D HIGH-9: writeback_node now SELECTs writeback_status +
+    verdict_revision before any side effect. Stub returns a sane shape so
+    the existing wk-8 tests still exercise the full HEC/notable_update
+    branches; tests for the idempotency short-circuit live in
+    `test_writeback_idempotent.py`.
+    """
+
+    def __init__(self, *, prior_writeback_status: str | None = None) -> None:
+        self._prior_writeback_status = prior_writeback_status
+        self.queries: list[tuple[str, dict[str, Any]]] = []
+
+    def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _Result:
+        sql = str(getattr(stmt, "text", stmt))
+        self.queries.append((sql, params or {}))
+        if "writeback_status" in sql and "verdict_revision" in sql:
+            return _Result(first=(self._prior_writeback_status, 1))
+        return _Result(rowcount=1)
+
+
 @contextmanager
 def _fake_session(_tenant_id: UUID) -> Any:
-    yield MagicMock()
+    yield _Conn()
 
 
 @pytest.fixture(autouse=True)
@@ -62,15 +90,9 @@ def patched(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
         return _f
 
-    monkeypatch.setattr(
-        nodes.audit, "emit_writeback_attempted", _track("writeback_attempted")
-    )
-    monkeypatch.setattr(
-        nodes.audit, "emit_writeback_succeeded", _track("writeback_succeeded")
-    )
-    monkeypatch.setattr(
-        nodes.audit, "emit_writeback_failed", _track("writeback_failed")
-    )
+    monkeypatch.setattr(nodes.audit, "emit_writeback_attempted", _track("writeback_attempted"))
+    monkeypatch.setattr(nodes.audit, "emit_writeback_succeeded", _track("writeback_succeeded"))
+    monkeypatch.setattr(nodes.audit, "emit_writeback_failed", _track("writeback_failed"))
     return captured
 
 
@@ -129,9 +151,7 @@ def _hec_tool(*, fail: bool = False) -> Any:
 
 def _notable_update_tool(*, fail: bool = False, degraded: bool = False) -> Any:
     @tool
-    async def siem_notable_update(
-        notable_id: str, comment: str, status: str | None = None
-    ) -> str:
+    async def siem_notable_update(notable_id: str, comment: str, status: str | None = None) -> str:
         """ES notable update."""
         if fail:
             raise RuntimeError("notable_update down")
@@ -201,9 +221,7 @@ async def test_hec_failure_marks_failed_does_not_raise(
     assert delta["writeback_attempts"][0]["ok"] is False
     detail = delta["writeback_attempts"][0]["detail"]
     assert detail["error_type"] == "RuntimeError"
-    failed_emits = [
-        kwargs for name, kwargs in patched["audit_calls"] if name == "writeback_failed"
-    ]
+    failed_emits = [kwargs for name, kwargs in patched["audit_calls"] if name == "writeback_failed"]
     assert failed_emits[0]["error"] == "hec_failed"
 
 
@@ -218,9 +236,7 @@ async def test_notable_update_failure_marks_failed(
         _config(tools=[_hec_tool(), _notable_update_tool(fail=True)]),
     )
     assert delta["writeback_status"] == "failed"
-    failed_emits = [
-        kwargs for name, kwargs in patched["audit_calls"] if name == "writeback_failed"
-    ]
+    failed_emits = [kwargs for name, kwargs in patched["audit_calls"] if name == "writeback_failed"]
     assert failed_emits[0]["error"] == "notable_update_failed"
 
 
@@ -264,9 +280,7 @@ async def test_dual_with_degraded_notable_update_marks_failed(
     assert delta["writeback_status"] == "failed"
     assert delta["writeback_attempts"][1]["tool"] == "siem_notable_update"
     assert delta["writeback_attempts"][1]["ok"] is False
-    failed_emits = [
-        kwargs for name, kwargs in patched["audit_calls"] if name == "writeback_failed"
-    ]
+    failed_emits = [kwargs for name, kwargs in patched["audit_calls"] if name == "writeback_failed"]
     assert failed_emits[0]["error"] == "notable_update_failed"
 
 
