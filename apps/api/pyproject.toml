@@ -15,6 +15,11 @@ dependencies = [
     # explicitness given the api directly imports `AsyncConnectionPool`.
     "langgraph-checkpoint-postgres>=3.0",
     "psycopg-pool>=3.2",
+    # Cluster A migration sidecar reuses the api image to run
+    # `alembic upgrade head` on cold-start. api itself never invokes
+    # alembic — it's pulled in here so the sidecar can find the binary
+    # in the api venv without a dedicated Dockerfile.
+    "alembic>=1.13",
 ]
 
 [dependency-groups]

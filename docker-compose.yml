@@ -31,6 +31,24 @@ services:
       interval: 5s
     restart: unless-stopped
 
+  # One-shot migration runner. Runs `alembic upgrade head` then exits.
+  # api/orchestrator/worker `depends_on: migrate: service_completed_successfully`
+  # so they don't try to authenticate as `app_runtime` before the role exists
+  # (cluster A migration `e5f7a1b9c4d6` creates it). Idempotent — no-op when
+  # the DB is already at head. Shares the api image (alembic + db/migrations
+  # baked in there) so `docker compose build` doesn't double-build.
+  migrate:
+    image: cyber-ai-triage-api
+    command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      APP_RUNTIME_PASSWORD: ${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sentient}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   redis:
     image: redis:7-alpine
     volumes:
@@ -95,6 +113,8 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET_EVIDENCE: ${MINIO_BUCKET_EVIDENCE:-evidence}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -127,6 +147,8 @@ services:
       # FastMCP mounts the streamable_http transport at /mcp.
       MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -154,6 +176,8 @@ services:
       # Worker drives Tier-2 LangGraph; same MCP endpoint as the orchestrator.
       MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

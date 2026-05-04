@@ -31,6 +31,13 @@ COPY --from=builder /app /app
 COPY libs/ocsf ./libs/ocsf
 COPY apps/api ./apps/api
 
+# Migrations + alembic.ini ride along so the same image can run as the
+# `migrate` one-shot service in compose (alembic + sqlalchemy already in
+# the api venv). Cluster A migration `e5f7a1b9c4d6` creates the
+# `app_runtime` Postgres role; cold-start is broken without it.
+COPY alembic.ini ./alembic.ini
+COPY db/migrations ./db/migrations
+
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
