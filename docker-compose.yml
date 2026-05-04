@@ -198,6 +198,13 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       # Worker drives Tier-2 LangGraph; same MCP endpoint as the orchestrator.
       MCP_SPLUNK_URL: ${MCP_SPLUNK_URL:-http://mcp-splunk:8080/mcp}
+      # Tier-2 finalize uploads the evidence manifest; without these the
+      # MinIO SDK falls back to localhost:9000 and the manifest write fails
+      # (verdict still finalizes — manifest upload is best-effort).
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET_EVIDENCE: ${MINIO_BUCKET_EVIDENCE:-evidence}
     depends_on:
       seed:
         condition: service_completed_successfully
@@ -206,6 +213,8 @@ services:
       redis:
         condition: service_healthy
       mcp-splunk:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     restart: unless-stopped
 
