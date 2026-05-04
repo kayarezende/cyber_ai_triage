@@ -1,10 +1,15 @@
 """Alembic env.
 
-Loads DATABASE_URL from .env at repo root (via python-dotenv-style manual parse — no
-runtime dep). Alembic manages only the application schema. LangGraph checkpointer
-tables (checkpoint_migrations, checkpoints, checkpoint_blobs, checkpoint_writes) are
-created separately by db/seeds/setup_checkpointer.py — do NOT autogenerate against
-them.
+Loads MIGRATION_DATABASE_URL (preferred) or DATABASE_URL from .env at repo
+root via a manual python-dotenv-style parse (no runtime dep). Migrations
+must run as a Postgres superuser to create roles, replace functions, and
+own triggers; the app's own DSN points at the lower-privilege `app_runtime`
+role from the `e5f7a1b9c4d6` migration onward, so the two DSNs are split.
+
+Alembic manages only the application schema. LangGraph checkpointer tables
+(checkpoint_migrations, checkpoints, checkpoint_blobs, checkpoint_writes)
+are created separately by db/seeds/setup_checkpointer.py — do NOT
+autogenerate against them.
 """
 
 import os
@@ -30,10 +35,13 @@ _load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 config = context.config
 
-database_url = os.environ.get(
-    "DATABASE_URL",
-    "postgresql+psycopg://postgres:postgres@localhost:5432/sentient",
-)
+database_url = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get("DATABASE_URL")
+if not database_url:
+    raise RuntimeError(
+        "Neither MIGRATION_DATABASE_URL nor DATABASE_URL is set. "
+        "Migrations must run as a superuser; set MIGRATION_DATABASE_URL "
+        "(or DATABASE_URL if app and migrations share a DSN)."
+    )
 config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:

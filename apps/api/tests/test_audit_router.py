@@ -39,9 +39,7 @@ def patch_audit_session(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         conn.execute.side_effect = execute
         yield conn
 
-    monkeypatch.setattr(
-        "sentient_api.routers.audit.tenant_session", fake_session
-    )
+    monkeypatch.setattr("sentient_api.routers.audit.tenant_session", fake_session)
     return state
 
 
@@ -61,6 +59,7 @@ def _build_chain_rows(scope: str, count: int) -> list[Any]:
         details_text = '{"i": ' + str(i) + "}"
         created_at_text = f"2026-04-27 12:00:0{i}+00"
         digest = compute_audit_row_hash(
+            hash_scope=scope,
             tenant_id_text=tenant_id_text,
             investigation_id_text=inv_id_text,
             actor=actor,
@@ -119,9 +118,7 @@ def test_list_audit_flags_broken_row(
     assert items[2]["chain_ok"] is False  # propagated through previous_hash mismatch
 
 
-def test_verify_endpoint_404(
-    wk9_client: TestClient, patch_audit_session: dict[str, Any]
-) -> None:
+def test_verify_endpoint_404(wk9_client: TestClient, patch_audit_session: dict[str, Any]) -> None:
     patch_audit_session["responses"] = [None]
     r = wk9_client.get(f"/api/audit/verify/{uuid4()}")
     assert r.status_code == 404
@@ -135,10 +132,7 @@ def test_verify_endpoint_walks_chain(
     rows = _build_chain_rows(scope, 4)
     # Format expected by verify SQL: id, content_hash, previous_hash, hash_scope,
     # tenant_id_text, investigation_id_text, actor, action, details_text, created_at_text
-    verify_rows = [
-        (r[0], r[5], r[6], r[7], r[9], r[10], r[2], r[3], r[11], r[12])
-        for r in rows
-    ]
+    verify_rows = [(r[0], r[5], r[6], r[7], r[9], r[10], r[2], r[3], r[11], r[12]) for r in rows]
     patch_audit_session["responses"] = [(1,), verify_rows]
     r = wk9_client.get(f"/api/audit/verify/{inv_id}")
     assert r.status_code == 200, r.text

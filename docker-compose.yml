@@ -82,7 +82,9 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      DATABASE_URL: postgresql+psycopg://${APP_RUNTIME_USER:-app_runtime}:${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-sentient}
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      APP_RUNTIME_PASSWORD: ${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}
       REDIS_URL: redis://redis:6379/0
       TENANT_SECRET_KEY: ${TENANT_SECRET_KEY:?TENANT_SECRET_KEY must be set in .env}
       DEV_BYPASS_AUTH: ${DEV_BYPASS_AUTH:-1}
@@ -111,7 +113,9 @@ services:
       context: .
       dockerfile: apps/orchestrator/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      DATABASE_URL: postgresql+psycopg://${APP_RUNTIME_USER:-app_runtime}:${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-sentient}
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      APP_RUNTIME_PASSWORD: ${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}
       REDIS_URL: redis://redis:6379/0
       TENANT_SECRET_KEY: ${TENANT_SECRET_KEY:?TENANT_SECRET_KEY must be set in .env}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -136,7 +140,9 @@ services:
       context: .
       dockerfile: apps/worker/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      DATABASE_URL: postgresql+psycopg://${APP_RUNTIME_USER:-app_runtime}:${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-sentient}
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentient}
+      APP_RUNTIME_PASSWORD: ${APP_RUNTIME_PASSWORD:?APP_RUNTIME_PASSWORD must be set in .env}
       REDIS_URL: redis://redis:6379/0
       TENANT_SECRET_KEY: ${TENANT_SECRET_KEY:?TENANT_SECRET_KEY must be set in .env}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

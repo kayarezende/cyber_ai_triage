@@ -45,8 +45,10 @@ def _load_dotenv(path: Path) -> None:
 
 
 def _resolve_dsn() -> str:
+    """Prefer MIGRATION_DATABASE_URL — seeds need superuser perms (cluster A
+    migration `e5f7a1b9c4d6` split app vs. migration DSNs)."""
     _load_dotenv(_ROOT / ".env")
-    dsn = os.environ.get(
+    dsn = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get(
         "DATABASE_URL",
         "postgresql://postgres:postgres@localhost:5432/sentient",
     )
@@ -150,8 +152,7 @@ _UPSERT_SQL = """
 def main() -> int:
     dsn = _resolve_dsn()
     rows = [
-        (name, desc, required, any_, override)
-        for name, desc, required, any_, override in _RULES
+        (name, desc, required, any_, override) for name, desc, required, any_, override in _RULES
     ]
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.executemany(_UPSERT_SQL, rows)

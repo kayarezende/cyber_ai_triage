@@ -47,8 +47,11 @@ def _load_dotenv(path: Path) -> None:
 
 
 def _resolve_dsn() -> str:
+    """Seeds need superuser perms (DDL-adjacent INSERTs on global tables);
+    prefer MIGRATION_DATABASE_URL, fall back to DATABASE_URL only if the
+    deployment hasn't split them (cluster A migration `e5f7a1b9c4d6`)."""
     _load_dotenv(_ROOT / ".env")
-    dsn = os.environ.get(
+    dsn = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get(
         "DATABASE_URL",
         "postgresql://postgres:postgres@localhost:5432/sentient",
     )
@@ -80,8 +83,7 @@ def _extract_tactics(obj: dict[str, Any]) -> list[str]:
     return [
         kcp["phase_name"]
         for kcp in obj.get("kill_chain_phases", [])
-        if kcp.get("kill_chain_name") == "mitre-attack"
-        and isinstance(kcp.get("phase_name"), str)
+        if kcp.get("kill_chain_name") == "mitre-attack" and isinstance(kcp.get("phase_name"), str)
     ]
 
 

@@ -277,7 +277,8 @@ async def test_passes_finding_and_tools_via_config(
     }
     await run_tier2_investigation(investigation_id=INV, tenant_id=TENANT, incident_id=INCIDENT)
     cfg = patch_graph["last_config"]["configurable"]
-    assert cfg["thread_id"].startswith("inv-")
+    # Cluster A (HIGH-5): thread_id = "{tenant_hex}:{investigation_hex}".
+    assert cfg["thread_id"] == f"{TENANT.hex}:{INV.hex}"
     assert cfg["tenant_id"] == str(TENANT)
     assert cfg["investigation_id"] == str(INV)
     # Tools loaded from MCP and threaded through config.
@@ -485,11 +486,15 @@ def test_pg_text_array() -> None:
     assert _pg_text_array(["T1059", "T1071.004"]) == "{T1059,T1071.004}"
 
 
-def test_make_thread_id_starts_with_inv() -> None:
-    tid = _make_thread_id(INV)
-    assert tid.startswith("inv-")
-    # Hex-prefix length: "inv-" + 12 chars.
-    assert len(tid) == len("inv-") + 12
+def test_make_thread_id_binds_tenant_and_investigation() -> None:
+    """HIGH-5 (cluster A): thread_id must include tenant_id so LangGraph's
+    Postgres checkpointer can never hand one tenant's state to another via
+    a colliding investigation UUID."""
+    tid = _make_thread_id(TENANT, INV)
+    # Tenant hex prefix + ':' separator + investigation hex.
+    assert tid == f"{TENANT.hex}:{INV.hex}"
+    assert TENANT.hex in tid
+    assert INV.hex in tid
 
 
 def test_strip_psycopg_dsn() -> None:
@@ -514,28 +519,22 @@ def test_is_interrupted_via_explicit_marker() -> None:
 def test_is_interrupted_via_pending_status_signal() -> None:
     """Defence-in-depth: when LangGraph drops `__interrupt__` channel, the
     `approval_status='pending' + writeback_status=None` shape still flags."""
-    assert _is_interrupted(
-        {"approval_status": "pending", "writeback_status": None}
-    ) is True
+    assert _is_interrupted({"approval_status": "pending", "writeback_status": None}) is True
 
 
 def test_is_interrupted_false_when_writeback_ran() -> None:
     """Resumed run: writeback_node populated writeback_status → not interrupted."""
-    assert _is_interrupted(
-        {"approval_status": "approved", "writeback_status": "succeeded"}
-    ) is False
+    assert (
+        _is_interrupted({"approval_status": "approved", "writeback_status": "succeeded"}) is False
+    )
 
 
 def test_is_interrupted_false_on_auto_approve() -> None:
     """Auto-approve path completes without interrupt + writeback runs."""
-    assert _is_interrupted(
-        {"approval_status": "auto", "writeback_status": "succeeded"}
-    ) is False
+    assert _is_interrupted({"approval_status": "auto", "writeback_status": "succeeded"}) is False
 
 
 def test_is_interrupted_false_on_pending_with_writeback_set() -> None:
     """Pathological state: pending but writeback ran (shouldn't normally happen,
     but the second signal must not false-positive)."""
-    assert _is_interrupted(
-        {"approval_status": "pending", "writeback_status": "succeeded"}
-    ) is False
+    assert _is_interrupted({"approval_status": "pending", "writeback_status": "succeeded"}) is False

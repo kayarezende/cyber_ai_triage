@@ -151,9 +151,7 @@ def list_audit(
     items = [
         AuditEntry(
             id=r["id"],
-            investigation_id=UUID(str(r["investigation_id"]))
-            if r["investigation_id"]
-            else None,
+            investigation_id=UUID(str(r["investigation_id"])) if r["investigation_id"] else None,
             actor=r["actor"],
             action=r["action"],
             details=r["details"],
@@ -167,9 +165,7 @@ def list_audit(
     ]
 
     next_cursor = (
-        encode_int_cursor(int(rows[page.limit - 1][0]))
-        if len(rows) > page.limit
-        else None
+        encode_int_cursor(int(rows[page.limit - 1][0])) if len(rows) > page.limit else None
     )
 
     return AuditPage(items=items, next_cursor=next_cursor)
@@ -189,9 +185,7 @@ _VERIFY_SQL = """
 """
 
 
-@router.get(
-    "/api/audit/verify/{investigation_id}", response_model=AuditVerifyResponse
-)
+@router.get("/api/audit/verify/{investigation_id}", response_model=AuditVerifyResponse)
 def verify_audit_chain(
     investigation_id: UUID,
     tenant_id: TenantId,
@@ -204,9 +198,7 @@ def verify_audit_chain(
             {"id": str(investigation_id)},
         ).first()
         if exists is None:
-            raise HTTPException(
-                status_code=404, detail="investigation_not_found"
-            )
+            raise HTTPException(status_code=404, detail="investigation_not_found")
         rows = list(conn.execute(text(_VERIFY_SQL), {"scope": scope}))
 
     payload = [

@@ -1,10 +1,15 @@
 """Tests for the wk-9 audit chain Python verifier.
 
-The pure-Python golden tests pin the digest formula against the plpgsql
-trigger from migration `b7c4e9a2f1d8`:
+Cluster A (2026-05-04) added `hash_scope` to the digest in lockstep with the
+plpgsql trigger; the helper now requires `hash_scope` as a kw-only no-default
+argument so future drift fails loudly at every call site.
+
+The pure-Python golden tests pin the digest formula against the trigger from
+migration `e5f7a1b9c4d6_app_runtime_role_audit_hardening.py`:
 
     NEW.content_hash := encode(
       digest(
+        COALESCE(NEW.hash_scope, '') || '|' ||
         COALESCE(NEW.tenant_id::text, '') || '|' ||
         COALESCE(NEW.investigation_id::text, '') || '|' ||
         COALESCE(NEW.actor, '') || '|' ||
@@ -42,6 +47,7 @@ def _expected(payload: str) -> str:
 
 def test_hash_matches_pipe_concat_formula() -> None:
     digest = compute_audit_row_hash(
+        hash_scope="investigation:00000000-0000-0000-0000-000000000010",
         tenant_id_text="00000000-0000-0000-0000-000000000001",
         investigation_id_text="00000000-0000-0000-0000-000000000010",
         actor="orchestrator:investigation",
@@ -51,6 +57,7 @@ def test_hash_matches_pipe_concat_formula() -> None:
         previous_hash="",
     )
     payload = (
+        "investigation:00000000-0000-0000-0000-000000000010|"
         "00000000-0000-0000-0000-000000000001|"
         "00000000-0000-0000-0000-000000000010|"
         "orchestrator:investigation|"
@@ -63,6 +70,7 @@ def test_hash_matches_pipe_concat_formula() -> None:
 
 def test_hash_handles_null_columns_via_empty_string() -> None:
     digest = compute_audit_row_hash(
+        hash_scope=None,
         tenant_id_text=None,
         investigation_id_text=None,
         actor=None,
@@ -71,11 +79,12 @@ def test_hash_handles_null_columns_via_empty_string() -> None:
         created_at_text=None,
         previous_hash=None,
     )
-    assert digest == _expected("||||||")
+    assert digest == _expected("|||||||")
 
 
 def test_hash_chains_through_previous_hash() -> None:
     first = compute_audit_row_hash(
+        hash_scope="s",
         tenant_id_text="t",
         investigation_id_text="i",
         actor="a",
@@ -85,6 +94,7 @@ def test_hash_chains_through_previous_hash() -> None:
         previous_hash="",
     )
     second = compute_audit_row_hash(
+        hash_scope="s",
         tenant_id_text="t",
         investigation_id_text="i",
         actor="a",
@@ -94,8 +104,25 @@ def test_hash_chains_through_previous_hash() -> None:
         previous_hash=first,
     )
     assert first != second
-    # Chain link: second's recompute uses first as previous_hash
-    assert second.endswith(second[-8:])  # sanity — non-empty hex
+    assert len(second) == 64  # sha256 hex length
+
+
+def test_hash_differs_when_only_scope_differs() -> None:
+    """MED-6 protection: identical content in two different scopes must not
+    collide. Without `hash_scope` in the digest, an attacker with row-write
+    access could move a row between scopes silently."""
+    base_kwargs = dict(
+        tenant_id_text="t",
+        investigation_id_text="i",
+        actor="a",
+        action="x",
+        details_text="{}",
+        created_at_text="2026-04-27 12:00:00+00",
+        previous_hash="",
+    )
+    digest_a = compute_audit_row_hash(hash_scope="investigation:aaa", **base_kwargs)
+    digest_b = compute_audit_row_hash(hash_scope="investigation:bbb", **base_kwargs)
+    assert digest_a != digest_b
 
 
 def _row(
@@ -106,8 +133,10 @@ def _row(
     details_text: str,
     created_at_text: str,
     previous_hash: str,
+    hash_scope: str = "test:scope",
 ) -> dict[str, object]:
     digest = compute_audit_row_hash(
+        hash_scope=hash_scope,
         tenant_id_text="t",
         investigation_id_text="i",
         actor=actor,
@@ -118,6 +147,7 @@ def _row(
     )
     return {
         "id": row_id,
+        "hash_scope": hash_scope,
         "actor": actor,
         "action": action,
         "details_text": details_text,
@@ -197,6 +227,25 @@ def test_verify_chain_detects_broken_previous_link() -> None:
     assert result.first_invalid_row_id == 1
 
 
+def test_verify_chain_detects_scope_mismatch() -> None:
+    """Cluster A MED-6: a row built under scope X but inserted with scope Y
+    must verify as broken, because the digest binds scope."""
+    row = _row(
+        row_id=0,
+        actor="a",
+        action="x",
+        details_text="{}",
+        created_at_text="2026-04-27 12:00:00+00",
+        previous_hash="",
+        hash_scope="investigation:aaa",
+    )
+    # Pretend the row was moved into a different scope.
+    row["hash_scope"] = "investigation:bbb"
+    result = verify_chain([row])
+    assert result.valid is False
+    assert result.first_invalid_row_id == 0
+
+
 def test_verify_chain_empty_input() -> None:
     result = verify_chain([])
     assert result.valid is True
@@ -209,7 +258,7 @@ def test_python_hash_matches_plpgsql_trigger() -> None:
     """Live-DB parity test. Inserts a row through the trigger, fetches the
     text-cast column values, recomputes the hash in Python.
     """
-    dsn = os.environ.get("DATABASE_URL", "")
+    dsn = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
     if not dsn:
         pytest.skip("DATABASE_URL not set")
 
@@ -226,21 +275,20 @@ def test_python_hash_matches_plpgsql_trigger() -> None:
                 "SELECT set_config('app.current_tenant', %s, true)",
                 ("00000000-0000-0000-0000-0000000000aa",),
             )
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO audit_log
                     (tenant_id, investigation_id, actor, action, details, hash_scope)
                 VALUES
                     ('00000000-0000-0000-0000-0000000000aa',
                      NULL,
                      'pytest:audit_chain',
-                     'wk9_chain_check',
+                     'cluster_a_chain_check',
                      '{"k": "v"}'::jsonb,
                      'tenant:00000000-0000-0000-0000-0000000000aa')
                 RETURNING id, tenant_id::text, investigation_id::text, actor, action,
-                          details::text, created_at::text, previous_hash, content_hash
-                """
-            )
+                          details::text, created_at::text, previous_hash, content_hash,
+                          hash_scope
+                """)
             row = cur.fetchone()
             assert row is not None
             (
@@ -253,12 +301,14 @@ def test_python_hash_matches_plpgsql_trigger() -> None:
                 created_at_text,
                 previous_hash,
                 content_hash,
+                hash_scope,
             ) = row
         # Roll back the INSERT — audit_log triggers reject DELETE/UPDATE,
         # so we let the txn rollback (no commit). The test row never persists.
         conn.rollback()
 
     expected = compute_audit_row_hash(
+        hash_scope=hash_scope,
         tenant_id_text=tenant_id_text,
         investigation_id_text=investigation_id_text,
         actor=actor,

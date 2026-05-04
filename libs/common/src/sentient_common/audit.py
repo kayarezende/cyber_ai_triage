@@ -47,15 +47,13 @@ def insert_audit_log(
         else f"tenant:{tenant_id}"
     )
     conn.execute(
-        text(
-            """
+        text("""
             INSERT INTO audit_log
                 (tenant_id, investigation_id, actor, action, details, hash_scope)
             VALUES
                 (:tenant_id, :investigation_id, :actor, :action,
                  CAST(:details AS jsonb), :hash_scope)
-            """
-        ),
+            """),
         {
             "tenant_id": str(tenant_id),
             "investigation_id": str(investigation_id) if investigation_id else None,
@@ -69,6 +67,7 @@ def insert_audit_log(
 
 def compute_audit_row_hash(
     *,
+    hash_scope: str | None,
     tenant_id_text: str | None,
     investigation_id_text: str | None,
     actor: str | None,
@@ -79,10 +78,13 @@ def compute_audit_row_hash(
 ) -> str:
     """Recompute SHA-256 over the same digest scope as the plpgsql trigger.
 
-    The trigger (migration `b7c4e9a2f1d8`) formats:
+    KEEP IN SYNC with
+    db/migrations/versions/e5f7a1b9c4d6_app_runtime_role_audit_hardening.py
+    ::compute_audit_hash. The trigger formats:
 
         encode(
           digest(
+            COALESCE(NEW.hash_scope, '') || '|' ||
             COALESCE(NEW.tenant_id::text, '') || '|' ||
             COALESCE(NEW.investigation_id::text, '') || '|' ||
             COALESCE(NEW.actor, '') || '|' ||
@@ -94,6 +96,10 @@ def compute_audit_row_hash(
           ), 'hex'
         )
 
+    `hash_scope` is kw-only with no default to force every call site to
+    pass it — silent default would mask scope-bind drift if the trigger
+    and helper ever diverge again.
+
     Inputs MUST be the Postgres-side text casts (uuid::text, jsonb::text,
     timestamptz::text) — Python's `str(uuid)` / `json.dumps()` /
     `datetime.isoformat()` differ from Postgres in casing, key ordering,
@@ -101,7 +107,9 @@ def compute_audit_row_hash(
     feeding the right casts.
     """
     payload = (
-        (tenant_id_text or "")
+        (hash_scope or "")
+        + "|"
+        + (tenant_id_text or "")
         + "|"
         + (investigation_id_text or "")
         + "|"
@@ -146,12 +154,13 @@ def verify_chain(
     """Walk an ordered list of rows (id ASC) within one `hash_scope`.
 
     Each row dict MUST carry the Postgres-side text casts:
-        id (int), tenant_id_text, investigation_id_text, actor, action,
-        details_text, created_at_text, content_hash, previous_hash.
+        id (int), hash_scope, tenant_id_text, investigation_id_text, actor,
+        action, details_text, created_at_text, content_hash, previous_hash.
 
     For row N: `previous_hash` must equal row N-1's `content_hash` (or
     empty string for the first row), and `content_hash` must match the
-    recomputed digest. First mismatch sets `first_invalid_row_id` and
+    recomputed digest (which now binds `hash_scope` per migration
+    `e5f7a1b9c4d6`). First mismatch sets `first_invalid_row_id` and
     `valid=False`.
     """
     results: list[AuditRowVerification] = []
@@ -163,6 +172,7 @@ def verify_chain(
         expected_prev = prior_hash
         stored_prev = row.get("previous_hash") or ""
         expected = compute_audit_row_hash(
+            hash_scope=row.get("hash_scope"),
             tenant_id_text=row.get("tenant_id_text"),
             investigation_id_text=row.get("investigation_id_text"),
             actor=row.get("actor"),

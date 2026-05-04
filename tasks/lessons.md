@@ -320,6 +320,38 @@ All 3 gates PASSED end-to-end. Several environment-specific gotchas surfaced; al
 - The `run_eval.py` CLI hits the same problem from a different angle: when run as `python evals/run_eval.py` (script form) Python adds `evals/` to sys.path so `from harness.x import` works; when run as `python -m evals.run_eval` it expects `from evals.harness.x import`. Resolved with a small `if __name__ == "__main__"` sys.path guard so both invocation forms work, then absolute imports throughout. Mypy resolves the absolute form cleanly; the runtime guard keeps the documented `python evals/run_eval.py` path alive.
 - **Rule:** when adding a new top-level test tree, both an `__init__.py` AND `testpaths` are required. When adding a CLI entry inside an importable package, prefer absolute imports + a `__main__`-only sys.path bootstrap so script form, module form (`-m`), and mypy all agree.
 
+## Cluster A bug-fix — compliance / multi-tenant integrity (2026-05-04)
+
+### Provision a non-superuser app role — RLS does not apply to superuser
+- ADR-0017 + `b7c4e9a2f1d8` set up `audit_writer`, RLS policies, and append-only triggers, but the app DSN authenticated as `postgres` (the cluster owner). Postgres superusers bypass RLS unconditionally and can `UPDATE`/`DELETE`/`TRUNCATE` despite triggers if the trigger doesn't cover the verb (TRUNCATE wasn't covered).
+- Fix in migration `e5f7a1b9c4d6`: create `app_runtime` LOGIN role (default INHERIT), grant per-table DML, grant `audit_writer` membership; switch the app DSN. `tenant_session()` adds `SET LOCAL ROLE app_runtime` belt-and-braces so a misconfigured DSN can't silently re-elevate.
+- **Rule:** RLS, role-based grants, and append-only triggers are dead weight unless the app authenticates as a non-superuser role. When designing tenant isolation, verify the app DSN's role first; the rest is theatre without it.
+
+### TRUNCATE needs its own BEFORE trigger; BEFORE DELETE doesn't cover it
+- `b7c4e9a2f1d8` added `audit_log_no_update` + `audit_log_no_delete` BEFORE triggers but no `BEFORE TRUNCATE` — so a privileged role could empty `audit_log` silently. Postgres treats TRUNCATE as a separate statement-level DDL-adjacent verb; `BEFORE DELETE FOR EACH ROW` never fires for it.
+- Fix: `CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATEMENT EXECUTE FUNCTION block_audit_modify();` (the existing `block_audit_modify()` raises for any verb, so the same function works).
+- **Rule:** when adding append-only protection, enumerate the four destructive verbs (UPDATE/DELETE/TRUNCATE/DROP) and add a trigger for each that the table type supports. Don't assume "BEFORE DELETE" covers TRUNCATE.
+
+### Hash-chain triggers need pg_advisory_xact_lock to handle concurrent inserts
+- `compute_audit_hash` did `SELECT prev_hash WHERE hash_scope = NEW.hash_scope ORDER BY id DESC LIMIT 1` then computed `content_hash`. Two concurrent INSERTs into the same scope could both read the same `prev_hash` and emit two rows pointing back to the same parent — a forked chain that `verify_chain` would correctly reject.
+- Fix: first statement in the trigger function is `PERFORM pg_advisory_xact_lock(hashtext('audit_log:' || COALESCE(NEW.hash_scope, '')));`. The lock is per-txn (released at commit/rollback). `hashtext()` collapses to int32 — collisions over-lock but never under-lock; correctness preserved.
+- **Rule:** any trigger that READs prior state then COMPUTEs new state from it (hash chains, sequence counters via SELECT MAX, derived ordinals) must serialize concurrent transactions on a per-key basis. Advisory locks are the cheapest way and don't require touching the table's lock manager.
+
+### Hash digest must bind every column that defines uniqueness — including hash_scope
+- The digest concatenated tenant_id, investigation_id, actor, action, details, created_at, previous_hash — but NOT `hash_scope`. A row inserted under scope A could be relabelled to scope B post-hoc and still pass `verify_chain` because the digest input was unchanged.
+- Fix: prepend `COALESCE(NEW.hash_scope, '') || '|' ||` to the digest concat in BOTH the plpgsql trigger AND the Python helper `compute_audit_row_hash`. Add `# KEEP IN SYNC with ...` cross-reference comments in both places.
+- **Rule:** when a digest spans multiple columns, any column that participates in the row's *identity* (here: which chain it belongs to) must be in the digest. "Used by the index, not the hash" is a footgun.
+
+### Plpgsql + Python digest helpers must stay in lockstep — make the Python signature kw-only-no-default to force test updates
+- Adding `hash_scope` to the digest broke parity between the trigger and `compute_audit_row_hash`. If the Python helper had defaulted `hash_scope=None`, every existing call site would silently keep computing the OLD digest — verify_chain would pass against the NEW trigger output once, then fail on every subsequent row. The drift would only surface at the first integration test against a real DB.
+- Fix: declare `compute_audit_row_hash(*, hash_scope: str | None, ...)` with no default. Pyright/mypy fails at every existing call site; pytest fails with `TypeError: missing required keyword-only argument 'hash_scope'`. Both signals fire immediately.
+- **Rule:** when a parity contract spans languages (plpgsql ↔ Python, SQL view ↔ ORM model, OpenAPI ↔ client), make the more-easily-changed side require the new field with no default. Silent defaults are how lockstep contracts break in production months later.
+
+### LangGraph thread_id must bind tenant_id — checkpointer is a flat keyspace
+- `_make_thread_id(investigation_id) -> f"inv-{investigation_id.hex[:12]}"` truncated to 12 hex chars and omitted tenant. LangGraph's Postgres checkpointer keys on the thread_id string alone — collisions across tenants would mix state. Even without a real collision, the `[:12]` truncation reduced the 128-bit UUID to ~48 bits of entropy.
+- Fix: `_make_thread_id(tenant_id, investigation_id) -> f"{tenant_id.hex}:{investigation_id.hex}"`. Resume paths read `langgraph_thread_id` straight off the DB column, so in-flight investigations finalize naturally under their old shape — no migration on existing rows needed.
+- **Rule:** any external-system identifier that the app mints (LangGraph thread_id, Redis keys, S3 keys, Splunk tags) must include the tenant_id. The shared keyspace is the multi-tenancy boundary; hex truncation is not safe at MSSP scale.
+
 ### Live eval-harness smoke caught two prod bugs the unit suite couldn't
 - First live run of `evals/run_eval.py` against the local compose stack surfaced two issues that the 567-strong unit suite had no signal on:
   1. **`MCP_SPLUNK_URL` missing from worker + orchestrator service env.** `apps/orchestrator/.../mcp_client.py:33` raises `RuntimeError("MCP_SPLUNK_URL not configured")` early; Tier-2 never started. The MCP server itself was healthy — the ENGINE just didn't know its address. Unit tests mock the MCP client, so the env-wire gap was invisible.

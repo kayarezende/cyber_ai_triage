@@ -237,7 +237,11 @@ async def test_investigation_smoke_runs_to_verdict(
     db_cleanup: Callable[[UUID, UUID, str | None], None],
 ) -> None:
     incident_id, investigation_id = _seed_test_incident(DEV_TENANT_ID)
-    thread_id = f"inv-{investigation_id.hex[:12]}"
+    # Cluster A (HIGH-5): thread_id binds tenant + investigation. Mirror the
+    # runner's `_make_thread_id` so cleanup wipes the right checkpoint key.
+    from sentient_orchestrator.investigation.runner import _make_thread_id
+
+    thread_id = _make_thread_id(DEV_TENANT_ID, investigation_id)
     db_cleanup(incident_id, investigation_id, thread_id)
 
     await run_tier2_investigation(

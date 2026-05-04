@@ -52,8 +52,10 @@ def _load_dotenv(path: Path) -> None:
 
 
 def _resolve_dsn() -> str:
+    """Prefer MIGRATION_DATABASE_URL — seeds need superuser perms (cluster A
+    migration `e5f7a1b9c4d6` split app vs. migration DSNs)."""
     _load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    dsn = os.environ.get(
+    dsn = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get(
         "DATABASE_URL",
         "postgresql://postgres:postgres@localhost:5432/sentient",
     )

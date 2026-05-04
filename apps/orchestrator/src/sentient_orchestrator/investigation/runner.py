@@ -69,8 +69,17 @@ def _strip_psycopg_dsn(database_url: str) -> str:
     return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
 
 
-def _make_thread_id(investigation_id: UUID) -> str:
-    return f"inv-{investigation_id.hex[:12]}"
+def _make_thread_id(tenant_id: UUID, investigation_id: UUID) -> str:
+    """Build the LangGraph thread_id binding tenant + investigation.
+
+    Tenant prefix prevents the (theoretical) cross-tenant checkpoint mix-up
+    where two tenants happen to mint colliding investigation UUIDs and
+    LangGraph's checkpointer hands one tenant's state to another. Resume
+    paths read `langgraph_thread_id` straight off the row, so old in-flight
+    investigations keep finalizing under their stored shape — no parser
+    needed.
+    """
+    return f"{tenant_id.hex}:{investigation_id.hex}"
 
 
 async def run_tier2_investigation(
@@ -290,9 +299,7 @@ async def _finalize_after_graph(
         approval_notes=final_state.get("approval_notes"),
         writeback_status=final_state.get("writeback_status"),
         writeback_attempts=list(final_state.get("writeback_attempts") or []),
-        detection_rule_matches=list(
-            final_state.get("detection_rule_matches") or []
-        ),
+        detection_rule_matches=list(final_state.get("detection_rule_matches") or []),
     )
     log.info(
         "tier-2 investigation complete",
@@ -323,7 +330,7 @@ def _claim_investigation(
     investigation_id: UUID, tenant_id: UUID, incident_id: UUID
 ) -> tuple[DetectionFinding, dict[str, Any], str] | None:
     """Atomic claim. Returns (finding, triage_ctx, thread_id) or None if not claimable."""
-    thread_id = _make_thread_id(investigation_id)
+    thread_id = _make_thread_id(tenant_id, investigation_id)
     with tenant_session(tenant_id) as conn:
         # Pull triage context off the investigation row (wk-5 wrote these).
         inv_row = conn.execute(
@@ -548,8 +555,7 @@ def _update_investigation_wk8_surface(
         except ValueError:
             candidate_uuid = None
     conn.execute(
-        text(
-            """
+        text("""
             WITH resolved AS (
                 SELECT id AS user_id
                   FROM users
@@ -573,8 +579,7 @@ def _update_investigation_wk8_surface(
                        ELSE human_approved_at
                    END
              WHERE id = :id
-            """
-        ),
+            """),
         {
             "id": str(investigation_id),
             "approval_status": approval_status,
@@ -708,12 +713,10 @@ def _load_resume_context(
     """
     with tenant_session(tenant_id) as conn:
         inv_row = conn.execute(
-            text(
-                """
+            text("""
                 SELECT incident_id, langgraph_thread_id, mitre_techniques
                   FROM investigations WHERE id = :id
-                """
-            ),
+                """),
             {"id": str(investigation_id)},
         ).first()
         if inv_row is None:
@@ -723,8 +726,7 @@ def _load_resume_context(
         thread_id = str(inv_row[1]) if inv_row[1] else ""
         if not thread_id:
             msg = (
-                f"investigation {investigation_id} has no langgraph_thread_id; "
-                "not interruptable"
+                f"investigation {investigation_id} has no langgraph_thread_id; " "not interruptable"
             )
             raise RuntimeError(msg)
         mitre_ids = list(inv_row[2] or [])
@@ -755,14 +757,10 @@ async def resume_investigation(job: ResumeJob) -> int:
     """
     investigation_id = job.investigation_id
     tenant_id = job.tenant_id
-    incident_id, thread_id, finding, mitre_ids = _load_resume_context(
-        investigation_id, tenant_id
-    )
+    incident_id, thread_id, finding, mitre_ids = _load_resume_context(investigation_id, tenant_id)
 
     with tenant_session(tenant_id) as conn:
-        mitre_descs = (
-            fetch_technique_descriptions(conn, mitre_ids) if mitre_ids else {}
-        )
+        mitre_descs = fetch_technique_descriptions(conn, mitre_ids) if mitre_ids else {}
 
     mcp_client = build_mcp_client()
     tools = await mcp_client.get_tools()
@@ -796,9 +794,7 @@ async def resume_investigation(job: ResumeJob) -> int:
             approved=job.approved,
             trace_id=job.trace_id,
         )
-        final_state = await graph.ainvoke(
-            Command(resume=resume_payload), config=config
-        )
+        final_state = await graph.ainvoke(Command(resume=resume_payload), config=config)
 
     if _is_interrupted(final_state):
         log.warning(
