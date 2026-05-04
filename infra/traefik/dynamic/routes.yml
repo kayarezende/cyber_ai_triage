@@ -1,0 +1,35 @@
+# Static routes for the dev stack. Used in place of the Docker provider
+# because Docker Desktop on macOS (4.55.0+) returns malformed responses
+# from `GET /version`, which haproxy/socket-proxy reject as 400 and
+# Traefik then can't enumerate container labels. Static routes don't need
+# the daemon at all.
+#
+# Hostnames resolve via /etc/hosts (see CLAUDE.md / README quickstart):
+#   127.0.0.1  app.triage.local  api.triage.local
+#
+# Service names (api:8000, web:3000) resolve over the compose network.
+
+http:
+  routers:
+    api:
+      rule: "Host(`api.triage.local`)"
+      service: api
+      entryPoints:
+        - web
+
+    web:
+      rule: "Host(`app.triage.local`)"
+      service: web
+      entryPoints:
+        - web
+
+  services:
+    api:
+      loadBalancer:
+        servers:
+          - url: "http://api:8000"
+
+    web:
+      loadBalancer:
+        servers:
+          - url: "http://web:3000"
