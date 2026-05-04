@@ -72,8 +72,7 @@ def claim_resume_intent(
     with tenant_session(tenant_id) as conn:
         row = conn.execute(
             text(
-                "SELECT id FROM investigations WHERE id = :id "
-                "AND tenant_id = :tenant FOR UPDATE"
+                "SELECT id FROM investigations WHERE id = :id " "AND tenant_id = :tenant FOR UPDATE"
             ),
             {"id": str(investigation_id), "tenant": str(tenant_id)},
         ).first()
