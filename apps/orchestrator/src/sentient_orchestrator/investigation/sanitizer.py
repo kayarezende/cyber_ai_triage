@@ -6,6 +6,14 @@ C0/C1 control characters (keeping `\\t`, `\\n`, `\\r`), normalize CRLF → LF,
 truncate per-field to 4 KB with a marker. Wk-12 hardens to a full
 trust-boundary marker framework.
 
+Cluster E (HIGH-10) adds depth + node-count caps to ``walk_and_sanitize`` so
+a recursive payload from a misbehaving tool result can't blow the stack or
+explode memory. Truncate-with-marker beats raise on the hot path:
+``walk_and_sanitize`` is called over OCSF text fields, every tool-result
+dict before it lands in graph state, and audit ``details`` payloads — an
+exception there would abort the whole investigation over a malformed input,
+which is strictly worse than a truncated audit row.
+
 Applied at three touchpoints (see plan §Sanitizer design):
   1. `prompt.build_initial_user_message` — over OCSF text fields, triage
      reasoning, entity lists.
@@ -29,6 +37,24 @@ MAX_FIELD_CHARS = 4000
 
 #: Truncation marker appended after `[:max_chars]` slice.
 _TRUNCATION_MARKER = "…[truncated]"
+
+#: HIGH-10: cap recursion depth for ``walk_and_sanitize``. 64 is well above
+#: any legitimate OCSF / tool-result shape we've seen in BOTS data; deep-nest
+#: payloads beyond this collapse to ``_DEPTH_EXCEEDED_MARKER`` rather than
+#: raising RecursionError mid-investigation.
+_MAX_DEPTH = 64
+
+#: HIGH-10: total node-count cap (across the entire walk, not per-branch).
+#: Real tool-result payloads sit well under 1k nodes; 10k gives ample
+#: headroom for OCSF-mapped enrichment objects while still bounding worst
+#: case at well under a megabyte of post-walk Python.
+_MAX_NODES = 10_000
+
+#: Sentinel strings substituted for over-budget subtrees. Stringly-typed so
+#: every consumer (audit JSON serialization, prompt rendering, manifest)
+#: handles them uniformly.
+_DEPTH_EXCEEDED_MARKER = "[depth-exceeded]"
+_SIZE_EXCEEDED_MARKER = "[size-exceeded]"
 
 #: Strip C0 (0x00–0x1F) + DEL (0x7F) + C1 (0x80–0x9F).
 #: Keep `\t` (0x09), `\n` (0x0A), `\r` (0x0D). Anything outside C0/C1
@@ -54,6 +80,52 @@ def sanitize_untrusted(value: str, *, max_chars: int = MAX_FIELD_CHARS) -> str:
     return cleaned
 
 
+def _walk_with_limits(obj: Any, depth: int, node_count: int, *, max_chars: int) -> tuple[Any, int]:
+    """Bounded recursion helper for ``walk_and_sanitize``.
+
+    Returns ``(sanitized_obj, updated_node_count)``. On overflow, returns the
+    appropriate marker string and a bumped count (so the caller still sees
+    progress and short-circuits its own iteration when total budget is
+    spent).
+    """
+    if depth > _MAX_DEPTH:
+        return _DEPTH_EXCEEDED_MARKER, node_count + 1
+    if node_count >= _MAX_NODES:
+        return _SIZE_EXCEEDED_MARKER, node_count + 1
+
+    if isinstance(obj, str):
+        return sanitize_untrusted(obj, max_chars=max_chars), node_count + 1
+
+    if isinstance(obj, dict):
+        out_dict: dict[Any, Any] = {}
+        node_count += 1
+        for k, v in obj.items():
+            if node_count >= _MAX_NODES:
+                out_dict[k] = _SIZE_EXCEEDED_MARKER
+                node_count += 1
+                break
+            sanitized, node_count = _walk_with_limits(v, depth + 1, node_count, max_chars=max_chars)
+            out_dict[k] = sanitized
+        return out_dict, node_count
+
+    if isinstance(obj, list):
+        out_list: list[Any] = []
+        node_count += 1
+        for v in obj:
+            if node_count >= _MAX_NODES:
+                out_list.append(_SIZE_EXCEEDED_MARKER)
+                node_count += 1
+                break
+            sanitized, node_count = _walk_with_limits(v, depth + 1, node_count, max_chars=max_chars)
+            out_list.append(sanitized)
+        return out_list, node_count
+
+    # Numbers, bools, None — pass through unchanged. Tuples/sets/etc fall
+    # into this branch by design (out of scope per the OCSF + tool-result
+    # shapes we handle); they are not recursed.
+    return obj, node_count + 1
+
+
 def walk_and_sanitize(obj: Any, *, max_chars: int = MAX_FIELD_CHARS) -> Any:
     """Recursively sanitize every string value inside a dict / list.
 
@@ -62,14 +134,14 @@ def walk_and_sanitize(obj: Any, *, max_chars: int = MAX_FIELD_CHARS) -> Any:
     OCSF schema field names from our own mapper, not Splunk-controlled).
     Lists recurse element-wise. Tuples / sets / other iterables are NOT
     recursed — out of scope for the OCSF + tool-result shapes we handle.
+
+    HIGH-10: bounded by ``_MAX_DEPTH`` + ``_MAX_NODES``. Subtrees that exceed
+    either cap are replaced by ``"[depth-exceeded]"`` / ``"[size-exceeded]"``
+    rather than raising — sanitizer is on the hot path and a malformed tool
+    result must not abort the investigation.
     """
-    if isinstance(obj, str):
-        return sanitize_untrusted(obj, max_chars=max_chars)
-    if isinstance(obj, dict):
-        return {k: walk_and_sanitize(v, max_chars=max_chars) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [walk_and_sanitize(v, max_chars=max_chars) for v in obj]
-    return obj
+    sanitized, _ = _walk_with_limits(obj, 0, 0, max_chars=max_chars)
+    return sanitized
 
 
 __all__ = ["MAX_FIELD_CHARS", "sanitize_untrusted", "walk_and_sanitize"]

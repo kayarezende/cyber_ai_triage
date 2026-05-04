@@ -32,6 +32,7 @@ from sentient_ocsf.detection_finding import (
     Metadata,
     Product,
 )
+from sentient_orchestrator.investigation import audit as audit_mod
 from sentient_orchestrator.investigation import runner as runner_mod
 from sentient_orchestrator.investigation.runner import _try_upload_manifest
 from sentient_orchestrator.investigation.state import InvestigationOutput
@@ -90,7 +91,13 @@ class _FakeConn:
 
 @pytest.fixture
 def patch_session(monkeypatch: pytest.MonkeyPatch) -> list[_FakeConn]:
-    """Each tenant_session() use gets a fresh _FakeConn; we collect them."""
+    """Each tenant_session() use gets a fresh _FakeConn; we collect them.
+
+    Cluster E HIGH-12: ``_try_upload_manifest`` now routes its failure-path
+    audit emit through ``emit_with_fallback`` (which lives in the audit
+    module). Patch both bindings so neither path falls back to the real
+    DSN-required ``tenant_session``.
+    """
     conns: list[_FakeConn] = []
 
     @contextmanager
@@ -100,6 +107,7 @@ def patch_session(monkeypatch: pytest.MonkeyPatch) -> list[_FakeConn]:
         yield conn
 
     monkeypatch.setattr(runner_mod, "tenant_session", session)
+    monkeypatch.setattr(audit_mod, "tenant_session", session)
     return conns
 
 
@@ -242,6 +250,7 @@ def test_double_failure_swallowed(
 
     monkeypatch.setattr(runner_mod, "upload_manifest", fake_upload)
     monkeypatch.setattr(runner_mod, "tenant_session", broken_session)
+    monkeypatch.setattr(audit_mod, "tenant_session", broken_session)
 
     # Must not raise — outer contract is "best-effort, never propagate".
     _try_upload_manifest(

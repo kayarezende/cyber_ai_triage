@@ -20,9 +20,13 @@ from typing import Any
 
 import httpx
 
+from sentient_common.logging import get_logger
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://sentientlayer.ai"
 X_TITLE = "Sentient Layer Triage"
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -206,10 +210,20 @@ def _parse_response(payload: dict[str, Any], *, latency_ms: int) -> OpenRouterRe
     output_tokens = int(usage.get("completion_tokens", 0) or 0)
     # OpenRouter exposes cached_tokens via `prompt_tokens_details.cached_tokens`
     # (OpenAI-style) for Anthropic + some other providers. Fall back to 0.
+    # Cluster E MED-12: a misbehaving provider returning a non-numeric value
+    # (string "n/a", nested dict, etc) must NOT convert a successful HTTP
+    # call into a `validation_fail` via parse error. Default to 0 + warn.
     cached = 0
     details = usage.get("prompt_tokens_details") or {}
     if isinstance(details, dict):
-        cached = int(details.get("cached_tokens", 0) or 0)
+        try:
+            cached = int(details.get("cached_tokens", 0) or 0)
+        except (ValueError, TypeError):
+            log.warning(
+                "cached_tokens unparseable; defaulting to 0",
+                raw_repr=repr(details.get("cached_tokens"))[:80],
+            )
+            cached = 0
     # Cluster C / HIGH-8: route via Decimal(str(...)) to avoid binary-float
     # drift on NUMERIC binds. `cost` arrives as int / float / str depending
     # on provider — str() coercion handles all three uniformly.

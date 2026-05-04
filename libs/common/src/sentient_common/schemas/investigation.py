@@ -8,9 +8,56 @@ container). The orchestrator re-exports these from `investigation.state` and
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.functional_validators import AfterValidator
+
+from sentient_common.logging import get_logger
+
+log = get_logger(__name__)
+
+#: MITRE ATT&CK technique-code shape: `T<digits>` with optional sub-technique
+#: `.<digits>`. Used by the AfterValidator below + the post-pass detection
+#: rule engine.
+_MITRE_CODE_RE = re.compile(r"^T\d+(\.\d+)?$")
+
+
+def _validate_mitre_codes(values: list[str]) -> list[str]:
+    """Drop malformed T-codes + de-dupe preserving order; warn on drops.
+
+    Cluster E MED-4: the LLM occasionally returns shapes like
+    ``"T1059.001;"``, ``" T1059"``, or empty strings. Per-element
+    ``Field(pattern=...)`` would raise ValidationError — the router then
+    buckets the whole call as ``validation_fail`` and burns a schema-retry
+    on a recoverable issue. Drop bad codes silently, surface them in a
+    structured warning, return the valid subset.
+    """
+    if not values:
+        return []
+    seen: set[str] = set()
+    kept: list[str] = []
+    dropped: list[str] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            dropped.append(repr(raw))
+            continue
+        if not _MITRE_CODE_RE.match(raw):
+            dropped.append(raw)
+            continue
+        if raw in seen:
+            continue
+        seen.add(raw)
+        kept.append(raw)
+    if dropped:
+        log.warning(
+            "mitre_techniques contained malformed codes; dropped",
+            dropped=dropped[:20],
+            kept=kept,
+        )
+    return kept
+
 
 Severity = Literal["info", "low", "medium", "high", "critical"]
 
@@ -18,9 +65,7 @@ Verdict = Literal["true_positive", "false_positive", "benign", "inconclusive"]
 
 ReviewStatus = Literal["approved", "flagged", "skipped"]
 HallucinationRisk = Literal["low", "medium", "high"]
-ConfidenceAssessment = Literal[
-    "overconfident", "well_calibrated", "underconfident"
-]
+ConfidenceAssessment = Literal["overconfident", "well_calibrated", "underconfident"]
 
 
 class InvestigationOutput(BaseModel):
@@ -45,12 +90,14 @@ class InvestigationOutput(BaseModel):
             "after deeper investigation."
         ),
     )
-    mitre_techniques: list[Annotated[str, Field(pattern=r"^T\d+(\.\d+)?$")]] = Field(
+    mitre_techniques: Annotated[list[str], AfterValidator(_validate_mitre_codes)] = Field(
         default_factory=list,
         description=(
             "Refined MITRE technique list. Removes Tier-1 guesses that "
             "weren't supported by evidence; adds techniques discovered "
-            "during investigation."
+            "during investigation. MED-4: malformed codes from the LLM "
+            "are dropped + warning-logged, not raised — partial output "
+            "is preferable to burning a schema-retry."
         ),
     )
     summary: str = Field(
@@ -91,20 +138,15 @@ class ReviewOutput(BaseModel):
     )
     hallucination_risk: HallucinationRisk = Field(
         ...,
-        description=(
-            "Likelihood that the draft cites unverified or fabricated evidence."
-        ),
+        description=("Likelihood that the draft cites unverified or fabricated evidence."),
     )
     confidence_assessment: ConfidenceAssessment = Field(
         ...,
         description=(
-            "Whether the draft's confidence is calibrated relative to the "
-            "evidence cited."
+            "Whether the draft's confidence is calibrated relative to the " "evidence cited."
         ),
     )
-    notes: str = Field(
-        ..., min_length=1, description="1-3 sentence critic notes."
-    )
+    notes: str = Field(..., min_length=1, description="1-3 sentence critic notes.")
     flagged_claims: list[str] = Field(
         default_factory=list,
         description=(

@@ -54,9 +54,17 @@ def test_confidence_bounds(conf: int) -> None:
         InvestigationOutput(**_ok_kwargs(confidence=conf))  # type: ignore[arg-type]
 
 
-def test_mitre_technique_pattern_rejects_non_t_codes() -> None:
-    with pytest.raises(ValidationError):
-        InvestigationOutput(**_ok_kwargs(mitre_techniques=["T1059", "S0001"]))  # type: ignore[arg-type]
+def test_mitre_technique_pattern_drops_non_t_codes() -> None:
+    """Cluster E MED-4: malformed codes are dropped + warned, not raised.
+
+    Pre-cluster-E this raised ValidationError (per-element ``Field(pattern=...)``).
+    Now an ``AfterValidator`` drops malformed codes silently with a warning so
+    a single hallucinated technique doesn't burn an LLM schema-retry.
+    """
+    out = InvestigationOutput(
+        **_ok_kwargs(mitre_techniques=["T1059", "S0001"]),  # type: ignore[arg-type]
+    )
+    assert out.mitre_techniques == ["T1059"]
 
 
 def test_mitre_technique_pattern_accepts_subtechniques() -> None:

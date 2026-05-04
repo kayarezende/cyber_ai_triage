@@ -44,6 +44,7 @@ from sentient_orchestrator.investigation.audit import (
     emit_investigation_started,
     emit_manifest_upload_failed,
     emit_manifest_uploaded,
+    emit_with_fallback,
 )
 from sentient_orchestrator.investigation.evidence import (
     build_evidence_manifest,
@@ -51,6 +52,10 @@ from sentient_orchestrator.investigation.evidence import (
 )
 from sentient_orchestrator.investigation.graph import build_investigation_graph
 from sentient_orchestrator.investigation.mcp_client import build_mcp_client
+from sentient_orchestrator.investigation.sanitizer import (
+    sanitize_untrusted,
+    walk_and_sanitize,
+)
 from sentient_orchestrator.investigation.state import (
     InvestigationOutput,
     InvestigationState,
@@ -642,7 +647,14 @@ def _update_investigation_with_review(
     """Wk-7. Persist review_status / notes / metadata. `review_notes` already
     exists from initial schema (line 118 of 81e2d43b3ec0); `review_status` +
     `review_metadata` arrive in `c1d8e3f4a9b2_wk7_cost_cap_review.py`.
+
+    Cluster E HIGH-11: ``notes`` and ``review`` (the metadata blob) come from
+    LLM output and pass through ``walk_and_sanitize`` + 1 KB truncation before
+    INSERT. The CHECK constraint ``review_notes_len`` (migration
+    ``c8e4d2a6b9f3``) is the belt-and-braces guard.
     """
+    notes_clean = sanitize_untrusted(str(review.get("notes") or ""))[:1024]
+    metadata_clean = walk_and_sanitize(review)
     conn.execute(
         text("""
             UPDATE investigations
@@ -654,8 +666,8 @@ def _update_investigation_with_review(
         {
             "id": str(investigation_id),
             "status": review.get("status"),
-            "notes": review.get("notes"),
-            "meta": json.dumps(review),
+            "notes": notes_clean,
+            "meta": json.dumps(metadata_clean),
         },
     )
 
@@ -718,20 +730,14 @@ def _try_upload_manifest(
             "evidence manifest upload failed; verdict still finalized",
             investigation_id=str(investigation_id),
         )
-        try:
-            with tenant_session(tenant_id) as conn:
-                emit_manifest_upload_failed(
-                    conn,
-                    tenant_id=tenant_id,
-                    investigation_id=investigation_id,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc)[:500],
-                )
-        except Exception:  # noqa: BLE001 — ledger write failed too; just log.
-            log.exception(
-                "manifest_upload_failed audit emit also failed",
-                investigation_id=str(investigation_id),
-            )
+        emit_with_fallback(
+            emit_manifest_upload_failed,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            fallback_action="manifest_upload_failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:500],
+        )
 
 
 def _pg_text_array(items: list[str]) -> str:

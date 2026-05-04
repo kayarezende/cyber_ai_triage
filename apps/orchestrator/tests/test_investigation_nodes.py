@@ -112,6 +112,10 @@ def patched_llm(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(nodes, "LLMRouter", _FakeRouter)
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    # Cluster E HIGH-12: review_node failure path now routes through
+    # ``audit.emit_with_fallback`` which opens its own ``tenant_session``
+    # on the audit module — patch that binding too.
+    monkeypatch.setattr(nodes.audit, "tenant_session", _fake_session)
     captured["next_result"] = _llm_result(content="ok")
     return captured
 
@@ -684,6 +688,7 @@ async def test_review_node_fallback_exhausted_yields_skipped(
 
     monkeypatch.setattr(nodes, "LLMRouter", _Router)
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    monkeypatch.setattr(nodes.audit, "tenant_session", _fake_session)
 
     delta = await review_node(
         {"draft_verdict": _draft_dict()},  # type: ignore[arg-type]
@@ -721,6 +726,7 @@ async def test_review_node_budget_exceeded_yields_skipped(
 
     monkeypatch.setattr(nodes, "LLMRouter", _Router)
     monkeypatch.setattr(nodes, "tenant_session", _fake_session)
+    monkeypatch.setattr(nodes.audit, "tenant_session", _fake_session)
 
     delta = await review_node(
         {"draft_verdict": _draft_dict()},  # type: ignore[arg-type]

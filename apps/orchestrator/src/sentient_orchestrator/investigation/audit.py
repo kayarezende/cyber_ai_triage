@@ -12,13 +12,19 @@ the audit chain.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from sentient_common.audit import insert_audit_log
+from sentient_common.db import tenant_session
+from sentient_common.logging import get_logger
 from sentient_orchestrator.investigation.sanitizer import walk_and_sanitize
+
+log = get_logger(__name__)
 
 #: Per-field cap on audit detail summaries. Tighter than the LLM-context
 #: cap (4KB) so a noisy tool blob doesn't dominate the audit row.
@@ -521,6 +527,76 @@ def emit_writeback_failed(
     )
 
 
+def emit_with_fallback(
+    emit_fn: Callable[..., None],
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID | None,
+    fallback_action: str,
+    **kwargs: Any,
+) -> None:
+    """Wrap an audit emit with an ``audit_chain_gap`` fallback.
+
+    Cluster E HIGH-12: bare ``try/except: log.exception(...)`` swallowed audit
+    emit failures silently. ``verify_chain`` then accepted the partial chain
+    as intact — the dropped row was invisible. This wrapper opens its own
+    ``tenant_session`` so callers don't have to manage one, then on emit
+    failure logs structured + INSERTs an ``audit_chain_gap`` row recording
+    the action + the error. If THAT also fails, log and continue
+    (best-effort — we are already on the failure path).
+
+    Args:
+      emit_fn: One of the ``emit_*`` helpers in this module. Called as
+        ``emit_fn(conn, tenant_id=..., investigation_id=..., **kwargs)``.
+      tenant_id: Required for ``tenant_session`` and the gap row.
+      investigation_id: ``None`` for tenant-scope audits (allowed).
+      fallback_action: Short name of the action that was being emitted.
+        Used as the gap row's ``attempted_action`` so admins can grep.
+      **kwargs: Forwarded to ``emit_fn``.
+    """
+    try:
+        with tenant_session(tenant_id) as conn:
+            emit_fn(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                **kwargs,
+            )
+        return
+    except Exception as exc:  # noqa: BLE001 — audit must not propagate
+        error_message = f"{type(exc).__name__}: {exc!s}"[:500]
+        log.exception(
+            "audit emit failed; recording in audit_chain_gap",
+            attempted_action=fallback_action,
+            tenant_id=str(tenant_id),
+            investigation_id=str(investigation_id) if investigation_id else None,
+        )
+        try:
+            with tenant_session(tenant_id) as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO audit_chain_gap
+                            (tenant_id, investigation_id,
+                             attempted_action, error_message)
+                        VALUES
+                            (:tenant_id, :investigation_id,
+                             :attempted_action, :error_message)
+                        """),
+                    {
+                        "tenant_id": str(tenant_id),
+                        "investigation_id": (str(investigation_id) if investigation_id else None),
+                        "attempted_action": fallback_action,
+                        "error_message": error_message,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — gap insert also best-effort
+            log.exception(
+                "audit_chain_gap insert also failed; surface lost",
+                attempted_action=fallback_action,
+                tenant_id=str(tenant_id),
+            )
+
+
 __all__ = [
     "ACTOR",
     "emit_approval_received",
@@ -538,6 +614,7 @@ __all__ = [
     "emit_review_started",
     "emit_tool_call",
     "emit_verdict_drafted",
+    "emit_with_fallback",
     "emit_writeback_attempted",
     "emit_writeback_failed",
     "emit_writeback_succeeded",

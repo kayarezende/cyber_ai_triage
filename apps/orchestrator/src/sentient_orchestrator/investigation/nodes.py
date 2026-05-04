@@ -582,19 +582,13 @@ async def review_node(state: InvestigationState, config: RunnableConfig) -> dict
             investigation_id=str(investigation_id),
             reason=reason,
         )
-        try:
-            with tenant_session(tenant_id) as conn:
-                audit.emit_review_skipped(
-                    conn,
-                    tenant_id=tenant_id,
-                    investigation_id=investigation_id,
-                    reason=reason,
-                )
-        except Exception:  # noqa: BLE001 — audit failure also best-effort
-            log.exception(
-                "review_skipped audit emit failed",
-                investigation_id=str(investigation_id),
-            )
+        audit.emit_with_fallback(
+            audit.emit_review_skipped,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            fallback_action="review_skipped",
+            reason=reason,
+        )
         return {
             "review_output": {
                 "status": "skipped",
@@ -606,19 +600,13 @@ async def review_node(state: InvestigationState, config: RunnableConfig) -> dict
             "review_node unhandled exception; skipping review",
             investigation_id=str(investigation_id),
         )
-        try:
-            with tenant_session(tenant_id) as conn:
-                audit.emit_review_skipped(
-                    conn,
-                    tenant_id=tenant_id,
-                    investigation_id=investigation_id,
-                    reason=f"{type(exc).__name__}: {exc!s:.200}",
-                )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "review_skipped audit emit failed",
-                investigation_id=str(investigation_id),
-            )
+        audit.emit_with_fallback(
+            audit.emit_review_skipped,
+            tenant_id=tenant_id,
+            investigation_id=investigation_id,
+            fallback_action="review_skipped",
+            reason=f"{type(exc).__name__}: {exc!s:.200}",
+        )
         return {
             "review_output": {
                 "status": "skipped",
@@ -811,7 +799,20 @@ async def await_approval_node(state: InvestigationState, config: RunnableConfig)
         resume_payload = {}
     approved = bool(resume_payload.get("approved"))
     approver_id_raw = resume_payload.get("analyst_id")
-    approver_id = str(approver_id_raw) if approver_id_raw else None
+    approver_id: str | None = None
+    if approver_id_raw:
+        # Cluster E MED-3: coerce to canonical UUID string at the trust
+        # boundary so downstream (audit_log.details.approver_id) doesn't
+        # carry a free-form analyst-supplied string. Invalid input → drop +
+        # warn; the FK update path further down already COALESCEs nulls.
+        try:
+            approver_id = str(UUID(str(approver_id_raw)))
+        except ValueError:
+            log.warning(
+                "await_approval analyst_id not a uuid; dropping",
+                investigation_id=str(investigation_id),
+                raw_repr=repr(str(approver_id_raw))[:120],
+            )
     notes_raw = resume_payload.get("notes") or ""
     notes = sanitize_untrusted(str(notes_raw))[:1024]
 
