@@ -100,13 +100,18 @@
 
 ## Carry-forward
 
-### Cold-start migration gate (compose sidecar)
-Compose currently has no `service_completed_successfully` gate from app services to a migration runner. With cluster A switching the app DSN to `app_runtime`, a cold `docker compose down -v && up` will fail to authenticate until `alembic upgrade head` runs (the role doesn't exist until then). Workaround: founder runs `alembic upgrade head` before bringing app services up. Follow-up commit will add a `migrate` one-shot service to compose with `depends_on: { migrate: { condition: service_completed_successfully } }` on api/orchestrator/worker.
+**CLOSED.** No carry-forward to cluster B.
+
+### Cold-start migration gate (compose sidecar) — DONE at a1d6e31
+Originally punted; shipped as a follow-up. New `migrate` one-shot service runs `alembic upgrade head` then exits. Reuses the api image (alembic + db/migrations baked in via Dockerfile + `alembic>=1.13` added to `apps/api/pyproject.toml`). Idempotent — sub-second no-op when DB is already at head.
+
+### Hands-free seed sidecar — DONE at 3baad14
+Bonus follow-up. New `seed` one-shot service chains after migrate and runs all 7 seeds in dependency order (setup_checkpointer → setup_minio → seed_tenants → seed_mitre → seed_llm_role_config → seed_hitl_policies → seed_detection_rules) via `db/seeds/seed_all.py`. All idempotent. seed_mitre fast-paths skip the 50 MB STIX download when the table is already populated. New `.dockerignore` keeps the cache out of the build context. api/orchestrator/worker now `depends_on: seed: service_completed_successfully` (transitively waits on migrate). Cold-start (`docker compose down -v && up -d`) is now hands-free in ~30s.
 
 ### Live-gate CLOSED (verified 2026-05-04)
-Founder live-gate ran in-session after Docker came up. All steps pass:
+All gate steps pass:
 - `alembic downgrade -1 && alembic upgrade head` round-trip ✓
-- `docker compose down -v && docker compose up -d` cold-start ✓ (confirmed the documented failure mode: api fails to authenticate as `app_runtime` until `alembic upgrade head` runs, then restart api/orchestrator/worker → healthy)
+- `docker compose down -v && docker compose up -d` cold-start ✓ (now hands-free via migrate + seed sidecars; no manual alembic / seed steps needed)
 - `python evals/run_eval.py --limit 1 --output /tmp/cluster-a-smoke.html` live canary ✓ (worker logs show new thread_id format `00000…0001:1bd0…b22` and graph reaches `tier-2 interrupted at await_approval; pending analyst` — the eval timeout is the HITL pause from the default 100% human approval policy, not a regression)
 - `apps/api/tests/test_app_runtime_role.py` + `apps/orchestrator/tests/test_audit_chain_concurrency.py` — 7/7 integration tests pass against live Postgres
 
