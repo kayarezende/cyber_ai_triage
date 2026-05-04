@@ -103,14 +103,18 @@
 ### Cold-start migration gate (compose sidecar)
 Compose currently has no `service_completed_successfully` gate from app services to a migration runner. With cluster A switching the app DSN to `app_runtime`, a cold `docker compose down -v && up` will fail to authenticate until `alembic upgrade head` runs (the role doesn't exist until then). Workaround: founder runs `alembic upgrade head` before bringing app services up. Follow-up commit will add a `migrate` one-shot service to compose with `depends_on: { migrate: { condition: service_completed_successfully } }` on api/orchestrator/worker.
 
-### Live-gate pending (no Docker in this session)
-Three verification steps from this cluster's gate could not run because Docker Desktop wasn't running in the implementation environment:
-- `alembic downgrade -1 && alembic upgrade head` round-trip
-- `docker compose down -v && docker compose up -d` cold-start
-- `python evals/run_eval.py --limit 1 --output /tmp/cluster-a-smoke.html` live canary
-- The two new integration tests (`apps/api/tests/test_app_runtime_role.py` + `apps/orchestrator/tests/test_audit_chain_concurrency.py`) — they `pytest.skip` without `MIGRATION_DATABASE_URL` + `APP_RUNTIME_PASSWORD` set against a live Postgres.
+### Live-gate CLOSED (verified 2026-05-04)
+Founder live-gate ran in-session after Docker came up. All steps pass:
+- `alembic downgrade -1 && alembic upgrade head` round-trip ✓
+- `docker compose down -v && docker compose up -d` cold-start ✓ (confirmed the documented failure mode: api fails to authenticate as `app_runtime` until `alembic upgrade head` runs, then restart api/orchestrator/worker → healthy)
+- `python evals/run_eval.py --limit 1 --output /tmp/cluster-a-smoke.html` live canary ✓ (worker logs show new thread_id format `00000…0001:1bd0…b22` and graph reaches `tier-2 interrupted at await_approval; pending analyst` — the eval timeout is the HITL pause from the default 100% human approval policy, not a regression)
+- `apps/api/tests/test_app_runtime_role.py` + `apps/orchestrator/tests/test_audit_chain_concurrency.py` — 7/7 integration tests pass against live Postgres
 
-Founder must run these on the dev box before declaring cluster A shipped. They join the existing wk-6/7/8/9/10 live-gate backlog.
+Two migration bugs surfaced + fixed in-session (committed as a follow-up to 8c12576):
+1. DO-block + parameter binding combo failed under psycopg (`IndeterminateDatatype`). Fixed by doing the role existence check in Python + emitting plain `CREATE ROLE`/`ALTER ROLE` with SQL-escaped password.
+2. `ALTER DEFAULT PRIVILEGES` only covers future tables. The 4 LangGraph checkpointer tables created by `setup_checkpointer.py` are out-of-band — they exist by the time the role is granted, so default privs miss them. Fixed by also doing `GRANT … ON ALL TABLES IN SCHEMA public` for existing tables, then re-restricting `audit_log` to INSERT+SELECT only.
+
+Pre-existing flake exposed (not cluster A): `apps/orchestrator/tests/test_verify_smoke.py::test_verify_smoke_resumes_after_inject_failure` fails with `APIConnectionError` when run after `test_verify_smoke_completes` (passes in isolation). OpenRouter connection-pool/rate-limit issue between back-to-back tests, unrelated to cluster A's role/grant changes. Track for cluster D test isolation work.
 
 ### Simplifications vs original cluster file
 - `_load_resume_context` reads `langgraph_thread_id` from the DB column rather than reconstructing from `investigation_id`. The original plan called for a "legacy parser" so old `inv-XXXX` thread_ids could still be parsed; in practice no parser is needed because the DB column is the source of truth. In-flight investigations finalize naturally.

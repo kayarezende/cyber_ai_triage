@@ -78,22 +78,21 @@ def upgrade() -> None:
 
     # 1. Create app_runtime (LOGIN, default INHERIT so audit_writer membership
     #    grants real privileges, not just a SET ROLE handle). Idempotent so
-    #    re-runs after a partial-rollback don't fail.
+    #    re-runs after a partial-rollback don't fail. The DO-block + parameter
+    #    binding combo is unworkable here — psycopg can't infer the type of
+    #    the parameter inside the EXECUTE'd string. Do the existence check in
+    #    Python instead and emit a plain CREATE/ALTER ROLE with the password
+    #    SQL-escaped (single quotes doubled). Password comes from a trusted
+    #    env var; only quote escaping is needed.
+    escaped_pw = password.replace("'", "''")
     bind = op.get_bind()
-    bind.execute(
-        text("""
-            DO $$
-            BEGIN
-              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime') THEN
-                EXECUTE format('CREATE ROLE app_runtime LOGIN PASSWORD %L', :pw);
-              ELSE
-                EXECUTE format('ALTER ROLE app_runtime LOGIN PASSWORD %L', :pw);
-              END IF;
-            END
-            $$
-            """),
-        {"pw": password},
-    )
+    role_exists = bind.execute(
+        text("SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime'")
+    ).fetchone()
+    if role_exists is None:
+        op.execute(f"CREATE ROLE app_runtime LOGIN PASSWORD '{escaped_pw}'")
+    else:
+        op.execute(f"ALTER ROLE app_runtime LOGIN PASSWORD '{escaped_pw}'")
 
     # 2. Connect + schema usage. Quote db_name defensively.
     op.execute(f'GRANT CONNECT ON DATABASE "{db_name}" TO app_runtime')
@@ -104,10 +103,44 @@ def upgrade() -> None:
     #    the direct grants would be enough — keeps the role intent explicit.
     for table in DML_TABLES:
         op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO app_runtime")
+
+    # 3a. Blanket grant on ALL existing tables in public — catches the 4
+    #     LangGraph checkpointer tables (checkpoints, checkpoint_blobs,
+    #     checkpoint_writes, checkpoint_migrations) created out-of-band by
+    #     `db/seeds/setup_checkpointer.py`. On a downgrade/upgrade cycle
+    #     those tables are NOT recreated by the seed (they survive across
+    #     role drops); ALTER DEFAULT PRIVILEGES (step 4a) only applies to
+    #     future tables, so without this blanket grant the round-trip
+    #     leaves checkpoints unreadable to app_runtime.
+    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_runtime")
+
+    # 3b. Re-restrict audit_log: the blanket grant above gave UPDATE/DELETE,
+    #     undoing the deliberate INSERT+SELECT-only restriction. REVOKE
+    #     and re-GRANT to make the privilege layer match the trigger layer.
+    op.execute("REVOKE ALL ON audit_log FROM app_runtime")
     op.execute("GRANT SELECT, INSERT ON audit_log TO app_runtime")
 
     # 4. Sequence usage (audit_log_id_seq, usage_id_seq, etc.).
     op.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_runtime")
+
+    # 4a. Default privileges for FUTURE tables/sequences in public schema —
+    #     LangGraph's PostgresSaver creates 4 checkpointer tables
+    #     (checkpoints, checkpoint_blobs, checkpoint_writes,
+    #     checkpoint_migrations) via db/seeds/setup_checkpointer.py AFTER
+    #     this migration runs. Without default privileges, app_runtime
+    #     gets `permission denied for table checkpoints` at every Tier-2
+    #     graph invocation. Granting on a per-table basis would require
+    #     running this migration AFTER the seed — a chicken-and-egg
+    #     cycle. Default privileges cover it cleanly because the migration
+    #     role (postgres superuser) is the same role that runs the seed.
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime"
+    )
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT USAGE, SELECT ON SEQUENCES TO app_runtime"
+    )
 
     # 5. Audit-writer membership (audit_writer was created in b7c4e9a2f1d8).
     op.execute("GRANT audit_writer TO app_runtime")
@@ -200,6 +233,16 @@ def downgrade() -> None:
 
     # 5. Drop audit_writer membership.
     op.execute("REVOKE audit_writer FROM app_runtime")
+
+    # 4a. Drop default privileges on future tables/sequences.
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM app_runtime"
+    )
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE USAGE, SELECT ON SEQUENCES FROM app_runtime"
+    )
 
     # 4. Sequence revoke.
     op.execute("REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public FROM app_runtime")
