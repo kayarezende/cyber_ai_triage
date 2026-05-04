@@ -399,6 +399,56 @@ def emit_approval_received(
     )
 
 
+def emit_hitl_policy_evaluation_failed(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+    policy_id: UUID | None,
+    policy_name: str | None,
+    error_message: str,
+    decision_ctx: dict[str, Any],
+) -> None:
+    """Cluster B HIGH-4. Policy walker raised at runtime; await_approval fell
+    back to needs_human=True. The audit row names the broken policy so admins
+    can fix it without trawling logs."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="hitl_policy_evaluation_failed",
+        details=walk_and_sanitize(
+            {
+                "policy_id": str(policy_id) if policy_id else None,
+                "policy_name": policy_name,
+                "error_message": error_message,
+                "decision_ctx": decision_ctx,
+            },
+            max_chars=_AUDIT_FIELD_CHARS,
+        ),
+    )
+
+
+def emit_writeback_tenant_missing(
+    conn: Connection,
+    *,
+    tenant_id: UUID,
+    investigation_id: UUID,
+) -> None:
+    """Cluster B HIGH-2. `_load_writeback_mode` couldn't find the tenant row.
+    Distinct signal from `writeback_failed` so admins can tell a tenant-config
+    bug apart from a Splunk transport failure."""
+    insert_audit_log(
+        conn,
+        tenant_id=tenant_id,
+        investigation_id=investigation_id,
+        actor=ACTOR,
+        action="writeback_tenant_missing",
+        details={"tenant_id": str(tenant_id)},
+    )
+
+
 def emit_writeback_attempted(
     conn: Connection,
     *,

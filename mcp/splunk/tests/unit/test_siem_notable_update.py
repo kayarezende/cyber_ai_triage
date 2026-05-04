@@ -79,9 +79,7 @@ class TestSiemNotableUpdateInput:
 
 @pytest.mark.asyncio
 class TestSiemNotableUpdateHandler:
-    async def test_degraded_when_no_notable_index(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_degraded_when_no_notable_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from sentient_mcp_splunk.tools import siem_notable_update as mod
         from sentient_mcp_splunk.tools.siem_get_notable import (
             _NotableIndexAbsentError,
@@ -91,9 +89,7 @@ class TestSiemNotableUpdateHandler:
             raise _NotableIndexAbsentError
 
         monkeypatch.setattr(mod, "_run_update_sync", boom)
-        out = await siem_notable_update(
-            SiemNotableUpdateInput(notable_id="n-1", comment="c")
-        )
+        out = await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         assert isinstance(out, SiemNotableUpdateOutput)
         assert out.degraded is True
         assert out.success is False
@@ -129,26 +125,20 @@ class TestSiemNotableUpdateHandler:
         assert out.splunk_response["status"] == 200
         assert captured["args"] == ("n-1", "verdict: tp", "in_progress", "high")
 
-    async def test_non_2xx_marks_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_non_2xx_marks_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from sentient_mcp_splunk.tools import siem_notable_update as mod
 
         def fake_run(*_a: Any, **_k: Any) -> dict[str, Any]:
             return {"status": 500, "body": "boom"}
 
         monkeypatch.setattr(mod, "_run_update_sync", fake_run)
-        out = await siem_notable_update(
-            SiemNotableUpdateInput(notable_id="n-1", comment="c")
-        )
+        out = await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         assert out.success is False
         assert out.degraded is False
         assert out.notes is not None
         assert "500" in out.notes
 
-    async def test_auth_failure_maps(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_auth_failure_maps(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from splunklib.binding import AuthenticationError, HTTPError
 
         from sentient_mcp_splunk.tools import siem_notable_update as mod
@@ -167,9 +157,7 @@ class TestSiemNotableUpdateHandler:
 
         monkeypatch.setattr(mod, "_run_update_sync", boom)
         with pytest.raises(SiemToolError) as exc:
-            await siem_notable_update(
-                SiemNotableUpdateInput(notable_id="n-1", comment="c")
-            )
+            await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         assert exc.value.kind == "auth_failure"
 
     async def test_timeout_maps(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,9 +168,7 @@ class TestSiemNotableUpdateHandler:
 
         monkeypatch.setattr(mod, "_run_update_sync", boom)
         with pytest.raises(SiemToolError) as exc:
-            await siem_notable_update(
-                SiemNotableUpdateInput(notable_id="n-1", comment="c")
-            )
+            await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         assert exc.value.kind == "search_timeout"
 
     async def test_http_4xx_maps(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,9 +188,7 @@ class TestSiemNotableUpdateHandler:
 
         monkeypatch.setattr(mod, "_run_update_sync", boom)
         with pytest.raises(SiemToolError) as exc:
-            await siem_notable_update(
-                SiemNotableUpdateInput(notable_id="n-1", comment="c")
-            )
+            await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         assert exc.value.kind == "splunk_4xx"
 
     async def test_internal_maps_unexpected_exceptions(
@@ -217,9 +201,7 @@ class TestSiemNotableUpdateHandler:
 
         monkeypatch.setattr(mod, "_run_update_sync", boom)
         with pytest.raises(SiemToolError) as exc:
-            await siem_notable_update(
-                SiemNotableUpdateInput(notable_id="n-1", comment="c")
-            )
+            await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         assert exc.value.kind == "internal"
 
     async def test_already_typed_error_not_re_wrapped(
@@ -233,8 +215,65 @@ class TestSiemNotableUpdateHandler:
 
         monkeypatch.setattr(mod, "_run_update_sync", boom)
         with pytest.raises(SiemToolError) as exc:
-            await siem_notable_update(
-                SiemNotableUpdateInput(notable_id="n-1", comment="c")
-            )
+            await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
         # If `except Exception` ran first this would have been re-classified.
         assert exc.value.kind == "auth_failure"
+
+    # HIGH-3: HTTP 200 + `{"success": false}` must NOT be reported as a
+    # successful writeback. The application-layer envelope wins.
+
+    async def test_body_success_false_overrides_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from sentient_mcp_splunk.tools import siem_notable_update as mod
+
+        def fake_run(*_a: Any, **_k: Any) -> dict[str, Any]:
+            return {
+                "status": 200,
+                "body": '{"success": false, "message": "notable not found"}',
+            }
+
+        monkeypatch.setattr(mod, "_run_update_sync", fake_run)
+        out = await siem_notable_update(SiemNotableUpdateInput(notable_id="n-missing", comment="c"))
+        assert out.success is False
+        assert out.degraded is False
+        assert out.notes is not None
+        assert "notable not found" in out.notes
+
+    async def test_body_success_true_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Explicit success=true plus 200 stays success."""
+        from sentient_mcp_splunk.tools import siem_notable_update as mod
+
+        def fake_run(*_a: Any, **_k: Any) -> dict[str, Any]:
+            return {"status": 200, "body": '{"success": true}'}
+
+        monkeypatch.setattr(mod, "_run_update_sync", fake_run)
+        out = await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
+        assert out.success is True
+        assert out.notes is None
+
+    async def test_non_json_body_falls_through_to_http_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Older Splunk versions emit non-JSON bodies — preserve the legacy
+        HTTP-status-only success path."""
+        from sentient_mcp_splunk.tools import siem_notable_update as mod
+
+        def fake_run(*_a: Any, **_k: Any) -> dict[str, Any]:
+            return {"status": 200, "body": "<html>OK</html>"}
+
+        monkeypatch.setattr(mod, "_run_update_sync", fake_run)
+        out = await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
+        assert out.success is True
+
+    async def test_body_compact_json_success_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pydantic-v2 / Splunk-emitted compact JSON (no whitespace) — exact
+        wire shape match per wk-8 lesson on substring detection drift."""
+        from sentient_mcp_splunk.tools import siem_notable_update as mod
+
+        def fake_run(*_a: Any, **_k: Any) -> dict[str, Any]:
+            return {"status": 200, "body": '{"success":false,"message":"acl"}'}
+
+        monkeypatch.setattr(mod, "_run_update_sync", fake_run)
+        out = await siem_notable_update(SiemNotableUpdateInput(notable_id="n-1", comment="c"))
+        assert out.success is False
+        assert out.notes is not None
+        assert "acl" in out.notes

@@ -676,9 +676,7 @@ async def apply_detection_rules_node(
     }
 
 
-async def await_approval_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def await_approval_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """Wk-8. HITL gate. Either auto-approves or fires `interrupt()`.
 
     The active HITL policy decides. `{"op":"always_true"}` (the MVP default
@@ -703,7 +701,28 @@ async def await_approval_node(
 
     with tenant_session(tenant_id) as conn:
         policy_id, policy_name, expression = select_active_policy(conn, tenant_id)
-        needs_human = evaluate_policy(expression, ctx)
+        try:
+            needs_human = evaluate_policy(expression, ctx)
+        except (ValueError, TypeError, RecursionError) as exc:
+            # HIGH-4: malformed policy must NEVER auto-approve. Fall back to
+            # the conservative default + emit a structured audit row so the
+            # admin panel can surface the broken policy. Per ADR-0009.
+            log.warning(
+                "hitl_policy_evaluation_failed",
+                policy_id=str(policy_id) if policy_id else None,
+                policy_name=policy_name,
+                error=str(exc),
+            )
+            audit.emit_hitl_policy_evaluation_failed(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                policy_id=policy_id,
+                policy_name=policy_name,
+                error_message=str(exc),
+                decision_ctx=ctx,
+            )
+            needs_human = True
 
     if not needs_human:
         with tenant_session(tenant_id) as conn:
@@ -728,15 +747,11 @@ async def await_approval_node(
     # (no-op if already 'awaiting_approval').
     with tenant_session(tenant_id) as conn:
         conn.execute(
-            text(
-                "UPDATE incidents SET status = 'awaiting_approval' WHERE id = :id"
-            ),
+            text("UPDATE incidents SET status = 'awaiting_approval' WHERE id = :id"),
             {"id": str(incident_id)},
         )
         conn.execute(
-            text(
-                "UPDATE investigations SET approval_status = 'pending' WHERE id = :id"
-            ),
+            text("UPDATE investigations SET approval_status = 'pending' WHERE id = :id"),
             {"id": str(investigation_id)},
         )
         audit.emit_awaiting_approval(
@@ -820,14 +835,29 @@ def _build_writeback_event(
     return base
 
 
+class WritebackTenantMissingError(LookupError):
+    """HIGH-2: tenant row for writeback_mode lookup doesn't exist.
+
+    Distinct from a NULL `writeback_mode` value (which is a legitimate
+    "default to hec_only"). A missing row means the tenant_id is invalid —
+    likely a misconfig — and the silent downgrade was masking it. Caller
+    in `writeback_node` traps this, emits a structured audit row, then
+    returns the writeback as failed (best-effort path: doesn't roll back
+    the verdict, but admin sees a clear signal).
+    """
+
+
 def _load_writeback_mode(conn: Any, tenant_id: UUID) -> str:
     row = conn.execute(
         text("SELECT writeback_mode FROM tenants WHERE id = :id"),
         {"id": str(tenant_id)},
     ).first()
-    if row is None or not row[0]:
-        return "hec_only"
-    return str(row[0])
+    if row is None:
+        raise WritebackTenantMissingError(str(tenant_id))
+    mode = row[0]
+    if not mode:
+        return "hec_only"  # NULL = legitimate default per ADR-0018
+    return str(mode)
 
 
 def _load_siem_notable_id(conn: Any, incident_id: UUID) -> str | None:
@@ -878,9 +908,7 @@ async def _invoke_writeback_tool(
         )
 
 
-async def writeback_node(
-    state: InvestigationState, config: RunnableConfig
-) -> dict[str, Any]:
+async def writeback_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     """Wk-8. Push the verdict back to Splunk.
 
     Always: HEC POST to `triage_verdicts` index (works on plain Splunk).
@@ -918,9 +946,39 @@ async def writeback_node(
             )
         return {"writeback_status": "skipped", "writeback_attempts": []}
 
-    with tenant_session(tenant_id) as conn:
-        wb_mode = _load_writeback_mode(conn, tenant_id)
-        siem_notable_id = _load_siem_notable_id(conn, incident_id)
+    try:
+        with tenant_session(tenant_id) as conn:
+            wb_mode = _load_writeback_mode(conn, tenant_id)
+            siem_notable_id = _load_siem_notable_id(conn, incident_id)
+    except WritebackTenantMissingError as exc:
+        # HIGH-2: tenant row absent. Pre-fix this returned 'hec_only' silently;
+        # writeback would attempt HEC against a tenant that doesn't exist and
+        # surface no signal in the audit chain. Now: emit dedicated audit row
+        # + writeback_failed + return failed shape (best-effort: verdict still
+        # ships in DB, but admin sees the misconfig).
+        miss_attempt = {
+            "tool": "writeback_mode_loader",
+            "ok": False,
+            "detail": {"error_message": f"tenant_missing: {exc}"},
+        }
+        with tenant_session(tenant_id) as conn:
+            audit.emit_writeback_tenant_missing(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+            )
+            audit.emit_writeback_failed(
+                conn,
+                tenant_id=tenant_id,
+                investigation_id=investigation_id,
+                mode="unknown",
+                attempts=[miss_attempt],
+                error="tenant_missing",
+            )
+        return {
+            "writeback_status": "failed",
+            "writeback_attempts": [miss_attempt],
+        }
 
     event = _build_writeback_event(finding, draft, investigation_id)
 
@@ -978,12 +1036,8 @@ async def writeback_node(
             nu_ok = False
         else:
             evidence_url_raw = state.get("evidence_s3_key")
-            evidence_url = (
-                str(evidence_url_raw) if evidence_url_raw else None
-            )
-            comment = _build_writeback_comment(
-                draft, investigation_id, evidence_url=evidence_url
-            )
+            evidence_url = str(evidence_url_raw) if evidence_url_raw else None
+            comment = _build_writeback_comment(draft, investigation_id, evidence_url=evidence_url)
             nu_ok, nu_detail = await _invoke_writeback_tool(
                 nu_tool,
                 {
@@ -992,9 +1046,7 @@ async def writeback_node(
                     "status": "in_progress",
                 },
             )
-            attempts.append(
-                {"tool": "siem_notable_update", "ok": nu_ok, "detail": nu_detail}
-            )
+            attempts.append({"tool": "siem_notable_update", "ok": nu_ok, "detail": nu_detail})
 
     overall_ok = hec_ok and nu_ok
     with tenant_session(tenant_id) as conn:

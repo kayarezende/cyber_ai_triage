@@ -101,9 +101,7 @@ def patch_admin_db(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             # llm_roles imports insert_audit_log too; usage is read-only and
             # never writes audit rows. The patched fixture covers the rest.
             monkeypatch.setattr(f"{module}.insert_audit_log", fake_audit)
-    monkeypatch.setattr(
-        "sentient_api.routers.admin.llm_roles.insert_audit_log", fake_audit
-    )
+    monkeypatch.setattr("sentient_api.routers.admin.llm_roles.insert_audit_log", fake_audit)
     return state
 
 
@@ -123,9 +121,7 @@ def test_admin_endpoint_403_for_analyst(
 def test_admin_endpoint_400_on_invalid_role_header(
     wk9_client: TestClient, patch_admin_db: dict[str, Any]
 ) -> None:
-    r = wk9_client.get(
-        "/api/admin/llm-roles", headers={"X-Dev-Role": "wizard"}
-    )
+    r = wk9_client.get("/api/admin/llm-roles", headers={"X-Dev-Role": "wizard"})
     assert r.status_code == 400
     assert r.json()["error"] == "invalid_role_header"
 
@@ -135,9 +131,7 @@ def test_admin_endpoint_400_on_invalid_role_header(
 # =====================================================================
 
 
-def test_list_llm_roles(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_list_llm_roles(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [
         [
             ("triage", "google/gemini-3-flash-preview", ["x-fallback"], 4096, 0.2, 30, True),
@@ -154,9 +148,7 @@ def test_list_llm_roles(
     assert body["items"][0]["enabled"] is True
 
 
-def test_update_llm_role_happy_path(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_update_llm_role_happy_path(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [
         ("triage", "anthropic/claude-haiku-4-5", ["fallback-1"], 2048, 0.1, 20, True),
     ]
@@ -168,9 +160,7 @@ def test_update_llm_role_happy_path(
         "timeout_seconds": 20,
         "enabled": True,
     }
-    r = wk9_client.put(
-        "/api/admin/llm-roles/triage", json=body, headers=ADMIN_HEADERS
-    )
+    r = wk9_client.put("/api/admin/llm-roles/triage", json=body, headers=ADMIN_HEADERS)
     assert r.status_code == 200, r.text
     assert r.json()["primary_model"] == "anthropic/claude-haiku-4-5"
     audits = patch_admin_db["audits"]
@@ -191,9 +181,7 @@ def test_update_llm_role_404_when_missing(
         "timeout_seconds": 10,
         "enabled": True,
     }
-    r = wk9_client.put(
-        "/api/admin/llm-roles/triage", json=body, headers=ADMIN_HEADERS
-    )
+    r = wk9_client.put("/api/admin/llm-roles/triage", json=body, headers=ADMIN_HEADERS)
     assert r.status_code == 404
     assert r.json()["detail"] == "llm_role_not_found"
 
@@ -209,9 +197,7 @@ def test_update_llm_role_rejects_unknown_role_via_path(
         "timeout_seconds": 10,
         "enabled": True,
     }
-    r = wk9_client.put(
-        "/api/admin/llm-roles/wizard", json=body, headers=ADMIN_HEADERS
-    )
+    r = wk9_client.put("/api/admin/llm-roles/wizard", json=body, headers=ADMIN_HEADERS)
     assert r.status_code == 422  # path Literal validation kicks in
 
 
@@ -220,9 +206,7 @@ def test_update_llm_role_rejects_unknown_role_via_path(
 # =====================================================================
 
 
-def test_list_hitl_policies(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_list_hitl_policies(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     pid = uuid4()
     patch_admin_db["responses"] = [
         [
@@ -237,9 +221,7 @@ def test_list_hitl_policies(
     assert items[0]["tenant_id"] is None  # global rule
 
 
-def test_create_hitl_policy_valid(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_create_hitl_policy_valid(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     pid = uuid4()
     patch_admin_db["responses"] = [
         (str(pid), str(uuid4()), "auto-approve-low", {"op": "always_false"}, 50, True),
@@ -279,9 +261,55 @@ def test_create_hitl_policy_400_on_invalid_expression(
     assert patch_admin_db["calls"] == []  # never reached the DB
 
 
-def test_update_hitl_policy_404(
+def test_create_hitl_policy_400_on_generic_compare_against_severity(
     wk9_client: TestClient, patch_admin_db: dict[str, Any]
 ) -> None:
+    """HIGH-1: severity is ranked, not numeric — generic gte must be rejected
+    with a pointer to the severity_* ops."""
+    r = wk9_client.post(
+        "/api/admin/hitl-policies",
+        json={
+            "name": "broken-severity-gate",
+            "rule_expression": {
+                "op": "gte",
+                "field": "severity",
+                "value": "high",
+            },
+            "priority": 100,
+            "enabled": True,
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "invalid_rule_expression"
+    assert "severity_gte" in detail["message"]
+    assert patch_admin_db["calls"] == []
+
+
+def test_create_hitl_policy_201_on_severity_op(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    """The domain-aware op shape must round-trip cleanly."""
+    pid = uuid4()
+    expr = {"op": "severity_gte", "field": "severity", "value": "high"}
+    patch_admin_db["responses"] = [
+        (str(pid), str(uuid4()), "approve-on-high", expr, 60, True),
+    ]
+    r = wk9_client.post(
+        "/api/admin/hitl-policies",
+        json={
+            "name": "approve-on-high",
+            "rule_expression": expr,
+            "priority": 60,
+            "enabled": True,
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_update_hitl_policy_404(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [None]
     r = wk9_client.put(
         f"/api/admin/hitl-policies/{uuid4()}",
@@ -300,9 +328,7 @@ def test_delete_hitl_policy_404_when_missing(
     wk9_client: TestClient, patch_admin_db: dict[str, Any]
 ) -> None:
     patch_admin_db["responses"] = [None]
-    r = wk9_client.delete(
-        f"/api/admin/hitl-policies/{uuid4()}", headers=ADMIN_HEADERS
-    )
+    r = wk9_client.delete(f"/api/admin/hitl-policies/{uuid4()}", headers=ADMIN_HEADERS)
     assert r.status_code == 404
 
 
@@ -310,9 +336,7 @@ def test_delete_hitl_policy_204_on_success(
     wk9_client: TestClient, patch_admin_db: dict[str, Any]
 ) -> None:
     patch_admin_db["responses"] = [{"deleted": True}]  # truthy → rowcount=1
-    r = wk9_client.delete(
-        f"/api/admin/hitl-policies/{uuid4()}", headers=ADMIN_HEADERS
-    )
+    r = wk9_client.delete(f"/api/admin/hitl-policies/{uuid4()}", headers=ADMIN_HEADERS)
     assert r.status_code == 204
     audits = patch_admin_db["audits"]
     assert audits and audits[0]["action"] == "admin_hitl_policy_deleted"
@@ -323,9 +347,7 @@ def test_delete_hitl_policy_204_on_success(
 # =====================================================================
 
 
-def test_get_budgets(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_get_budgets(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [(5, 200.00, 0.50, 100_000)]
     r = wk9_client.get("/api/admin/budgets", headers=ADMIN_HEADERS)
     assert r.status_code == 200, r.text
@@ -336,9 +358,7 @@ def test_get_budgets(
     assert body["per_investigation_token_cap"] == 100_000
 
 
-def test_update_budgets_happy_path(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_update_budgets_happy_path(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [(10, 500.00, 1.00, 200_000)]
     r = wk9_client.put(
         "/api/admin/budgets",
@@ -359,6 +379,7 @@ def test_update_budgets_accepts_nulls() -> None:
     """Null on every field should disable the cap; verified via Pydantic
     parse, no DB hit needed."""
     from sentient_api.routers.admin.budgets import TenantBudgetsUpdate
+
     body = TenantBudgetsUpdate.model_validate({})  # every field optional
     assert body.max_concurrent_investigations is None
     assert body.monthly_llm_budget_usd is None
@@ -394,18 +415,14 @@ def patch_splunk_probe(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         resp.status_code = state["status_code"]
         return resp
 
-    monkeypatch.setattr(
-        "sentient_api.routers.admin.splunk_creds.httpx.get", fake_get
-    )
+    monkeypatch.setattr("sentient_api.routers.admin.splunk_creds.httpx.get", fake_get)
     monkeypatch.setattr(
         "sentient_api.routers.admin.splunk_creds.encrypt", lambda s: b"E:" + s.encode()
     )
     return state
 
 
-def test_get_splunk_config(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_get_splunk_config(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [("splunk.local", "dual", True, True)]
     r = wk9_client.get("/api/admin/splunk", headers=ADMIN_HEADERS)
     assert r.status_code == 200, r.text
@@ -510,9 +527,7 @@ def test_update_splunk_skip_probe_without_token(
 # =====================================================================
 
 
-def test_list_users(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_list_users(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     uid = uuid4()
     patch_admin_db["responses"] = [
         [
@@ -527,9 +542,7 @@ def test_list_users(
     assert items[0]["role"] == "admin"
 
 
-def test_invite_user_201(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_invite_user_201(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     uid = uuid4()
     patch_admin_db["responses"] = [
         (str(uid), "new@founder.local", "analyst", None, None),
@@ -559,9 +572,7 @@ def test_invite_user_rejects_bad_email(
     assert r.status_code == 422
 
 
-def test_update_user_role_404(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_update_user_role_404(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [None]
     r = wk9_client.patch(
         f"/api/admin/users/{uuid4()}",
@@ -594,9 +605,7 @@ def test_update_user_role_happy_path(
 # =====================================================================
 
 
-def test_usage_returns_aggregates(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_usage_returns_aggregates(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     """Two execute calls: monthly aggregate + status breakdown."""
     patch_admin_db["responses"] = [
         # monthly aggregate rows
@@ -629,9 +638,7 @@ def test_usage_returns_aggregates(
         # status breakdown rows
         [("success", 48), ("timeout", 2)],
     ]
-    r = wk9_client.get(
-        "/api/admin/usage?months_back=3", headers=ADMIN_HEADERS
-    )
+    r = wk9_client.get("/api/admin/usage?months_back=3", headers=ADMIN_HEADERS)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["months_back"] == 3
@@ -649,15 +656,11 @@ def test_usage_returns_aggregates(
 def test_usage_rejects_out_of_range_window(
     wk9_client: TestClient, patch_admin_db: dict[str, Any]
 ) -> None:
-    r = wk9_client.get(
-        "/api/admin/usage?months_back=99", headers=ADMIN_HEADERS
-    )
+    r = wk9_client.get("/api/admin/usage?months_back=99", headers=ADMIN_HEADERS)
     assert r.status_code == 422  # ge=1 le=24
 
 
-def test_usage_handles_empty_window(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_usage_handles_empty_window(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     patch_admin_db["responses"] = [[], []]
     r = wk9_client.get("/api/admin/usage", headers=ADMIN_HEADERS)
     assert r.status_code == 200, r.text
@@ -667,8 +670,6 @@ def test_usage_handles_empty_window(
     assert body["by_status"] == []
 
 
-def test_usage_403_for_analyst(
-    wk9_client: TestClient, patch_admin_db: dict[str, Any]
-) -> None:
+def test_usage_403_for_analyst(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     r = wk9_client.get("/api/admin/usage", headers=ANALYST_HEADERS)
     assert r.status_code == 403

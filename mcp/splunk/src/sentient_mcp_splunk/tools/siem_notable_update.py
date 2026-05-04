@@ -17,6 +17,7 @@ process level is sufficient and saves a round-trip per call on plain Splunk.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any
 
@@ -141,18 +142,54 @@ async def siem_notable_update(
 
     http_status = int(response.get("status", 0))
     success = 200 <= http_status < 300
+
+    # HIGH-3: Splunk ES can return HTTP 200 with `{"success": false, "message": ...}`
+    # in the body — typically when the notable_id doesn't exist or the user
+    # lacks the `notable_edit` capability. Pre-fix this was reported as a
+    # successful writeback. Parse the body and let the application-layer
+    # success flag override the HTTP-status one. Versions of Splunk that
+    # don't emit a structured envelope still report success via HTTP 200
+    # (the `try`-block falls through unchanged on parse failure).
+    body_text = str(response.get("body", "") or "")
+    parsed_message: str | None = None
+    if body_text:
+        try:
+            parsed = json.loads(body_text)
+        except (ValueError, TypeError):
+            parsed = None
+            log.warning(
+                "siem_notable_update body not JSON",
+                notable_id=input_.notable_id,
+                http_status=http_status,
+            )
+        if isinstance(parsed, dict) and "success" in parsed:
+            if parsed.get("success") is False:
+                success = False
+                msg = parsed.get("message")
+                if isinstance(msg, str):
+                    parsed_message = msg[:512]
+
     log.info(
         "siem_notable_update complete",
         notable_id=input_.notable_id,
         http_status=http_status,
+        success=success,
         duration_ms=int((time.perf_counter() - started) * 1000),
     )
+    if success:
+        notes = None
+    elif parsed_message:
+        notes = f"splunk reported success=false: {parsed_message}"
+    elif http_status >= 200 and http_status < 300:
+        notes = "splunk reported success=false"
+    else:
+        notes = f"non-2xx HTTP status: {http_status}"
     return SiemNotableUpdateOutput(
         notable_id=input_.notable_id,
         success=success,
         degraded=False,
         splunk_response=response,
-        notes=None if success else f"non-2xx HTTP status: {http_status}",
+        notes=notes,
     )
 
 

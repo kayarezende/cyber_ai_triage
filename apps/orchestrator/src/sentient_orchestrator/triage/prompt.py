@@ -8,6 +8,7 @@ the MITRE technique descriptions resolved from the local cache.
 from __future__ import annotations
 
 from sentient_ocsf.detection_finding import DetectionFinding
+from sentient_orchestrator.investigation.sanitizer import sanitize_untrusted
 
 SYSTEM_PROMPT = """You are a Tier-1 SOC triage analyst for an Australian MSSP.
 
@@ -49,20 +50,20 @@ def build_user_message(
 
     lines: list[str] = [
         "Finding:",
-        f"- Title: {info.title}",
+        f"- Title: {sanitize_untrusted(info.title)}",
         f"- SIEM-reported severity: {sev_name}",
     ]
     if info.desc:
-        lines.append(f"- Description: {info.desc}")
+        lines.append(f"- Description: {sanitize_untrusted(info.desc)}")
     if info.analytic and info.analytic.name:
-        lines.append(f"- Analytic: {info.analytic.name}")
+        lines.append(f"- Analytic: {sanitize_untrusted(info.analytic.name)}")
 
     actor_name = (
         finding.actor.user.name
         if finding.actor and finding.actor.user and finding.actor.user.name
         else None
     )
-    lines.append(f"\nActor: {actor_name or '(none)'}")
+    lines.append(f"\nActor: {sanitize_untrusted(actor_name) if actor_name else '(none)'}")
     lines.append(f"Source: {_endpoint_str(finding.src_endpoint)}")
     lines.append(f"Destination: {_endpoint_str(finding.dst_endpoint)}")
 
@@ -74,14 +75,14 @@ def build_user_message(
                 continue
             seen.add(tcode)
             desc = mitre_descs.get(tcode)
-            lines.append(f"- {tcode}" + (f": {desc}" if desc else ""))
+            lines.append(f"- {tcode}" + (f": {sanitize_untrusted(desc)}" if desc else ""))
         for attack in finding.attacks:
             tcode = attack.technique.uid
             if tcode in seen:
                 continue
             seen.add(tcode)
             desc = mitre_descs.get(tcode)
-            lines.append(f"- {tcode}" + (f": {desc}" if desc else ""))
+            lines.append(f"- {tcode}" + (f": {sanitize_untrusted(desc)}" if desc else ""))
     else:
         lines.append("\nMITRE annotations from SIEM: (none)")
 
@@ -89,7 +90,11 @@ def build_user_message(
 
 
 def _endpoint_str(endpoint: object) -> str:
-    """Render NetworkEndpoint as `hostname (ip[:port])`, or '(none)'."""
+    """Render NetworkEndpoint as `hostname (ip[:port])`, or '(none)'.
+
+    Sanitizes hostname + ip strings (Splunk-controlled). Port is int-cast so
+    a control-char-laden numeric never reaches the prompt.
+    """
     if endpoint is None:
         return "(none)"
     hostname = getattr(endpoint, "hostname", None)
@@ -99,10 +104,10 @@ def _endpoint_str(endpoint: object) -> str:
         return "(none)"
     parts: list[str] = []
     if hostname:
-        parts.append(str(hostname))
-    addr = str(ip) if ip else None
+        parts.append(sanitize_untrusted(str(hostname)))
+    addr = sanitize_untrusted(str(ip)) if ip else None
     if addr and port:
-        addr = f"{addr}:{port}"
+        addr = f"{addr}:{int(port)}"
     if addr:
         parts.append(f"({addr})" if hostname else addr)
     return " ".join(parts)

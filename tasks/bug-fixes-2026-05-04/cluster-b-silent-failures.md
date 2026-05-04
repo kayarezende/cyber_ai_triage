@@ -90,4 +90,15 @@
 - Sanitizer recursion limits (cluster E)
 
 ## Carry-forward
-(Fill in if anything punted.)
+**CLOSED 2026-05-04.** No carry-forward to cluster C.
+
+All five findings landed:
+- CRIT-3 — Tier-1 prompt sanitizer parity (`apps/orchestrator/.../triage/prompt.py`)
+- HIGH-1 — `severity_*` ops + save-time veto (`libs/common/.../hitl.py`)
+- HIGH-2 — `_load_writeback_mode` raises `WritebackTenantMissingError` on missing tenant
+- HIGH-3 — `siem_notable_update` parses body for `success=false` envelope
+- HIGH-4 — `await_approval_node` traps policy-walker exceptions → conservative fallback + audit
+
+Verification gate: 637 unit tests green (+39 new), ruff/black/mypy clean on changed files, live canary `evals/run_eval.py --limit 1` ran end-to-end without orchestrator/worker crash (eval-harness verdict was `timeout` per wk-10 known data-shape limitation, not a code defect).
+
+Lessons appended under `tasks/lessons.md` §"Cluster B bug-fix — silent wrong-verdict failures (2026-05-04)".
