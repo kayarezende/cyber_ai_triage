@@ -87,6 +87,7 @@ def patch_admin_db(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     for module in (
         "sentient_api.routers.admin.llm_roles",
+        "sentient_api.routers.admin.provider_keys",
         "sentient_api.routers.admin.hitl_policies",
         "sentient_api.routers.admin.budgets",
         "sentient_api.routers.admin.splunk_creds",
@@ -102,6 +103,12 @@ def patch_admin_db(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             # never writes audit rows. The patched fixture covers the rest.
             monkeypatch.setattr(f"{module}.insert_audit_log", fake_audit)
     monkeypatch.setattr("sentient_api.routers.admin.llm_roles.insert_audit_log", fake_audit)
+    # provider_keys encrypts before persisting — stub it so the suite needs no
+    # TENANT_SECRET_KEY and the key never leaves the test in plaintext form.
+    monkeypatch.setattr(
+        "sentient_api.routers.admin.provider_keys.encrypt",
+        lambda plaintext: b"ciphertext:" + plaintext.encode(),
+    )
     return state
 
 
@@ -673,3 +680,125 @@ def test_usage_handles_empty_window(wk9_client: TestClient, patch_admin_db: dict
 def test_usage_403_for_analyst(wk9_client: TestClient, patch_admin_db: dict[str, Any]) -> None:
     r = wk9_client.get("/api/admin/usage", headers=ANALYST_HEADERS)
     assert r.status_code == 403
+
+
+# =====================================================================
+# provider_keys (multi-provider, encrypted, write-only)
+# =====================================================================
+
+
+def test_list_provider_keys_masks_and_fills_all(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    patch_admin_db["responses"] = [
+        [("groq", "9f3a", datetime(2026, 5, 27, tzinfo=UTC))]
+    ]
+    r = wk9_client.get("/api/admin/provider-keys", headers=ADMIN_HEADERS)
+    assert r.status_code == 200, r.text
+    items = {i["provider"]: i for i in r.json()["items"]}
+    # All four providers reported; only groq is set.
+    assert set(items) == {"openrouter", "groq", "gemini", "anthropic"}
+    assert items["groq"]["is_set"] is True
+    assert items["groq"]["key_last4"] == "9f3a"
+    assert items["openrouter"]["is_set"] is False
+    # Plaintext/ciphertext never surfaced.
+    assert "api_key" not in items["groq"]
+    assert "key_encrypted" not in items["groq"]
+
+
+def test_set_provider_key_encrypts_and_audits(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    patch_admin_db["responses"] = [("3a9f", datetime(2026, 5, 27, tzinfo=UTC))]
+    r = wk9_client.put(
+        "/api/admin/provider-keys/groq",
+        json={"api_key": "gsk-supersecret-3a9f"},
+        headers=ADMIN_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["is_set"] is True
+    assert r.json()["key_last4"] == "3a9f"
+    # Ciphertext (stub) was bound, never the raw key.
+    insert_call = next(
+        c for c in patch_admin_db["calls"] if "INSERT INTO provider_credentials" in c[0]
+    )
+    assert insert_call[1]["key_encrypted"] == b"ciphertext:gsk-supersecret-3a9f"
+    assert insert_call[1]["key_last4"] == "3a9f"
+    audits = patch_admin_db["audits"]
+    assert audits[-1]["action"] == "admin_provider_key_set"
+    assert audits[-1]["details"] == {"provider": "groq", "key_last4": "3a9f"}
+
+
+def test_delete_provider_key_404_when_absent(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    patch_admin_db["responses"] = []  # rowcount 0
+    r = wk9_client.delete("/api/admin/provider-keys/gemini", headers=ADMIN_HEADERS)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "provider_key_not_found"
+
+
+def test_provider_keys_403_for_analyst(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    r = wk9_client.get("/api/admin/provider-keys", headers=ANALYST_HEADERS)
+    assert r.status_code == 403
+
+
+# =====================================================================
+# llm_roles — provider prefix + structured-capability validation
+# =====================================================================
+
+
+def test_update_llm_role_rejects_unknown_provider_prefix(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    body = {
+        "primary_model": "grok:whatever",
+        "fallback_chain": [],
+        "max_tokens": 1024,
+        "temperature": 0.0,
+        "timeout_seconds": 10,
+        "enabled": True,
+    }
+    r = wk9_client.put("/api/admin/llm-roles/triage", json=body, headers=ADMIN_HEADERS)
+    assert r.status_code == 422, r.text
+
+
+def test_update_structured_role_rejects_anthropic_direct(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    body = {
+        "primary_model": "anthropic:claude-sonnet-4-6",
+        "fallback_chain": [],
+        "max_tokens": 1024,
+        "temperature": 0.0,
+        "timeout_seconds": 10,
+        "enabled": True,
+    }
+    r = wk9_client.put(
+        "/api/admin/llm-roles/investigation", json=body, headers=ADMIN_HEADERS
+    )
+    assert r.status_code == 422, r.text
+    assert (
+        r.json()["detail"]["error"] == "model_cannot_produce_structured_output"
+    )
+
+
+def test_update_structured_role_accepts_groq_strict(
+    wk9_client: TestClient, patch_admin_db: dict[str, Any]
+) -> None:
+    patch_admin_db["responses"] = [
+        ("triage", "groq:openai/gpt-oss-120b", [], 1024, 0.0, 30, True),
+    ]
+    body = {
+        "primary_model": "groq:openai/gpt-oss-120b",
+        "fallback_chain": [],
+        "max_tokens": 1024,
+        "temperature": 0.0,
+        "timeout_seconds": 30,
+        "enabled": True,
+    }
+    r = wk9_client.put("/api/admin/llm-roles/triage", json=body, headers=ADMIN_HEADERS)
+    assert r.status_code == 200, r.text
+    assert r.json()["primary_model"] == "groq:openai/gpt-oss-120b"

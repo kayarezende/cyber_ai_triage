@@ -85,7 +85,7 @@ def _patch_loaders(
 
 def _tenant_cfg() -> _TenantConfig:
     return _TenantConfig(
-        api_key="sk-test",
+        byo_keys={"openrouter": "sk-test"},
         region_constraint=None,
         langsmith_enabled=True,
         per_investigation_budget_usd=None,

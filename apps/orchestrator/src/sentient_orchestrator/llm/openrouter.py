@@ -21,10 +21,16 @@ from typing import Any
 import httpx
 
 from sentient_common.logging import get_logger
+from sentient_orchestrator.llm.catalog import (
+    HTTP_REFERER,
+    PROVIDERS,
+    X_TITLE,
+    ProviderSpec,
+)
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-HTTP_REFERER = "https://sentientlayer.ai"
-X_TITLE = "Sentient Layer Triage"
+#: Back-compat alias — moved to the OpenRouter ``ProviderSpec`` but re-exported
+#: here (with HTTP_REFERER / X_TITLE via __all__) so existing imports keep working.
+OPENROUTER_URL = PROVIDERS["openrouter"].base_url
 
 log = get_logger(__name__)
 
@@ -79,6 +85,7 @@ async def call_chat_completion(
     max_tokens: int,
     temperature: float,
     timeout: float,
+    spec: ProviderSpec | None = None,
     response_format: dict[str, Any] | None = None,
     region_constraint: str | None = None,
     tools: list[dict[str, Any]] | None = None,
@@ -100,14 +107,20 @@ async def call_chat_completion(
     `response_format=json_schema` — most providers reject the combination.
     The router enforces this; we don't double-check here.
     """
+    if spec is None:
+        spec = PROVIDERS["openrouter"]
+
     wire_messages = _apply_cache_markers(messages)
     body: dict[str, Any] = {
         "model": model,
         "messages": wire_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "usage": {"include": True},
     }
+    if spec.send_usage_param:
+        # OpenRouter opt-in to cost reporting. Other providers reject unknown
+        # params (e.g. Groq 400s), so this key is omitted for them.
+        body["usage"] = {"include": True}
     if response_format is not None:
         body["response_format"] = response_format
     if tools:
@@ -116,25 +129,24 @@ async def call_chat_completion(
         # Pass through explicit choice when caller specified it.
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
-    if region_constraint:
+    if region_constraint and spec.supports_provider_field:
         # ADR-0016: dormant in MVP. OpenRouter's `provider` filter has no
         # `region` key today — region routing post-MVP requires a
         # constraint→provider-list resolver (e.g. AU-southeast → Bedrock-syd
         # / Azure-AU). For now, when ANY region constraint is set we at
         # least force `data_collection: deny` so payloads aren't retained
-        # by intermediary providers.
+        # by intermediary providers. Only OpenRouter honours this field.
         body["provider"] = {"data_collection": "deny"}
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": HTTP_REFERER,
-        "X-Title": X_TITLE,
+        **spec.extra_headers,
     }
 
     start = time.monotonic()
     response = await client.post(
-        OPENROUTER_URL,
+        spec.base_url,
         headers=headers,
         json=body,
         timeout=timeout,
@@ -294,7 +306,9 @@ def _parse_tool_calls(raw: Any) -> list[OpenRouterToolCall]:
 
 
 __all__ = [
+    "HTTP_REFERER",
     "OPENROUTER_URL",
+    "X_TITLE",
     "OpenRouterResponse",
     "OpenRouterToolCall",
     "call_chat_completion",

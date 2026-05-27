@@ -55,7 +55,7 @@ async def test_cap_breached_after_first_attempt_blocks_second(
     making any HTTP call to model-b. Confirms HIGH-6 per-attempt re-check.
     """
     tenant_cfg = _TenantConfig(
-        api_key="sk-test",
+        byo_keys={"openrouter": "sk-test"},
         region_constraint=None,
         langsmith_enabled=True,
         per_investigation_budget_usd=Decimal("0.50"),
@@ -150,7 +150,7 @@ async def test_cap_disabled_outer_gate_no_per_attempt_check(
     """Both caps None — outer-gate skips the per-attempt _check_budget call
     entirely. Verified by counting SELECTs against `investigations`."""
     tenant_cfg = _TenantConfig(
-        api_key="k",
+        byo_keys={"openrouter": "k"},
         region_constraint=None,
         langsmith_enabled=True,
         per_investigation_budget_usd=None,

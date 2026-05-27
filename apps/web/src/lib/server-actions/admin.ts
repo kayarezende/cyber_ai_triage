@@ -5,7 +5,9 @@ import { revalidatePath } from "next/cache";
 import { ApiError, apiFetch } from "@/lib/api";
 import type {
   HitlPolicy,
+  LlmProvider,
   LlmRoleConfig,
+  ProviderKeyStatus,
   TenantBudgets,
   TenantUser,
 } from "@/lib/types";
@@ -44,12 +46,22 @@ async function handle<T>(fn: () => Promise<T>): Promise<ActionResult<T>> {
 
 // ---- LLM roles
 
+// Recombine the provider dropdown + bare model into a `provider:model` ref.
+// OpenRouter is left unprefixed so existing/bare rows stay clean.
+function composeModelRef(provider: string, model: string): string {
+  const m = model.trim();
+  if (!provider || provider === "openrouter") return m;
+  return `${provider}:${m}`;
+}
+
 export async function updateLlmRole(
   role: string,
   formData: FormData,
 ): Promise<ActionResult<LlmRoleConfig>> {
+  const provider = String(formData.get("provider") ?? "openrouter");
+  const model = String(formData.get("primary_model") ?? "");
   const body = {
-    primary_model: String(formData.get("primary_model") ?? ""),
+    primary_model: composeModelRef(provider, model),
     fallback_chain: String(formData.get("fallback_chain") ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -189,5 +201,35 @@ export async function updateUserRole(
     }),
   );
   if (result.ok) revalidatePath("/admin/users");
+  return result;
+}
+
+// ---- provider keys
+
+export async function setProviderKey(
+  provider: LlmProvider,
+  formData: FormData,
+): Promise<ActionResult<ProviderKeyStatus>> {
+  const apiKey = String(formData.get("api_key") ?? "").trim();
+  if (!apiKey) {
+    return { ok: false, error: "empty_key", detail: "Enter an API key to save." };
+  }
+  const result = await handle(() =>
+    apiFetch<ProviderKeyStatus>(`/api/admin/provider-keys/${provider}`, {
+      method: "PUT",
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  );
+  if (result.ok) revalidatePath("/admin/provider-keys");
+  return result;
+}
+
+export async function deleteProviderKey(
+  provider: LlmProvider,
+): Promise<ActionResult<void>> {
+  const result = await handle(() =>
+    apiFetch<void>(`/api/admin/provider-keys/${provider}`, { method: "DELETE" }),
+  );
+  if (result.ok) revalidatePath("/admin/provider-keys");
   return result;
 }

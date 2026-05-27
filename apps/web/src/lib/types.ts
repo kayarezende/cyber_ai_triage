@@ -157,6 +157,19 @@ export interface LlmRoleListResponse {
   items: LlmRoleConfig[];
 }
 
+export type LlmProvider = "openrouter" | "groq" | "gemini" | "anthropic";
+
+export interface ProviderKeyStatus {
+  provider: LlmProvider;
+  is_set: boolean;
+  key_last4: string | null;
+  updated_at: string | null;
+}
+
+export interface ProviderKeyListResponse {
+  items: ProviderKeyStatus[];
+}
+
 export interface HitlPolicy {
   id: string;
   tenant_id: string | null;

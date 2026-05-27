@@ -3,16 +3,32 @@
 import { useState, useTransition } from "react";
 
 import { updateLlmRole } from "@/lib/server-actions/admin";
-import type { LlmRoleConfig } from "@/lib/types";
+import type { LlmProvider, LlmRoleConfig } from "@/lib/types";
 
 interface Props {
   role: LlmRoleConfig;
+}
+
+const PROVIDERS: LlmProvider[] = ["openrouter", "groq", "gemini", "anthropic"];
+
+// Split a stored model ref into (provider, bareModel). A bare slug (or an
+// OpenRouter org slug like `anthropic/claude-...`) maps to openrouter.
+function splitModelRef(ref: string): { provider: LlmProvider; model: string } {
+  const idx = ref.indexOf(":");
+  if (idx > 0) {
+    const head = ref.slice(0, idx);
+    if ((PROVIDERS as string[]).includes(head)) {
+      return { provider: head as LlmProvider, model: ref.slice(idx + 1) };
+    }
+  }
+  return { provider: "openrouter", model: ref };
 }
 
 export function LlmRoleForm({ role }: Props) {
   const [pending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const initial = splitModelRef(role.primary_model);
 
   return (
     <form
@@ -43,13 +59,27 @@ export function LlmRoleForm({ role }: Props) {
         </label>
       </div>
       <div className="grid grid-cols-2 gap-3 text-xs">
+        <label className="flex flex-col gap-1 text-zinc-400">
+          provider
+          <select
+            name="provider"
+            defaultValue={initial.provider}
+            className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
+          >
+            {PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </label>
         <Field
           label="primary_model"
           name="primary_model"
-          defaultValue={role.primary_model}
+          defaultValue={initial.model}
         />
         <Field
-          label="fallback_chain (comma-separated)"
+          label="fallback_chain (comma-separated, prefix e.g. openrouter:…)"
           name="fallback_chain"
           defaultValue={role.fallback_chain.join(", ")}
         />

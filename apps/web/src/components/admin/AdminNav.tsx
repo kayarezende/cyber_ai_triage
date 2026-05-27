@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 const ITEMS = [
   { href: "/admin/llm-roles", label: "LLM roles" },
+  { href: "/admin/provider-keys", label: "Provider keys" },
   { href: "/admin/hitl-policies", label: "HITL policies" },
   { href: "/admin/budgets", label: "Budgets" },
   { href: "/admin/splunk", label: "Splunk" },
