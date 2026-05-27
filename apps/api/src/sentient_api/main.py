@@ -35,6 +35,9 @@ from sentient_api.routers.admin import (
     llm_roles as admin_llm_roles,
 )
 from sentient_api.routers.admin import (
+    provider_keys as admin_provider_keys,
+)
+from sentient_api.routers.admin import (
     splunk_creds as admin_splunk_creds,
 )
 from sentient_api.routers.admin import (
@@ -68,6 +71,7 @@ app.include_router(approvals.router)
 app.include_router(audit.router)
 app.include_router(replay.router)
 app.include_router(admin_llm_roles.router)
+app.include_router(admin_provider_keys.router)
 app.include_router(admin_hitl_policies.router)
 app.include_router(admin_budgets.router)
 app.include_router(admin_splunk_creds.router)

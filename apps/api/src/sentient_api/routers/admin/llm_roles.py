@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
 
 from sentient_api.deps import RequireAdmin, TenantId
@@ -33,6 +33,48 @@ log = get_logger(__name__)
 # Keep in sync with `sentient_orchestrator.llm.router.ACTIVE_ROLES` —
 # duplicating the literal here so the API doesn't import the orchestrator.
 LlmRole = Literal["triage", "investigation", "review", "summarize", "entity_extraction"]
+
+# --- Provider/capability validation -----------------------------------------
+# Mirrors `sentient_orchestrator.llm.catalog` (kept minimal + duplicated so the
+# API need not import the orchestrator). A model ref is `provider:model`; a bare
+# slug means OpenRouter. Roles in STRUCTURED_ROLES require a model that can
+# produce schema-conforming JSON — the orchestrator depends on it.
+_ALLOWED_PROVIDERS: frozenset[str] = frozenset(
+    {"openrouter", "groq", "gemini", "anthropic"}
+)
+STRUCTURED_ROLES: frozenset[str] = frozenset({"triage", "investigation", "review"})
+def _parse_provider(model_ref: str) -> tuple[str, str]:
+    head, sep, tail = model_ref.partition(":")
+    if sep and head in _ALLOWED_PROVIDERS:
+        return head, tail
+    return "openrouter", model_ref
+
+
+def _validate_provider_prefix(model_ref: str) -> str:
+    """Reject an explicit-but-unknown provider prefix (e.g. `grok:`).
+
+    A `/` in the head (OpenRouter org slugs like `anthropic/claude-...`) is not
+    a provider prefix and is left alone.
+    """
+    head, sep, _tail = model_ref.partition(":")
+    if sep and head not in _ALLOWED_PROVIDERS and "/" not in head:
+        raise ValueError(
+            f"unknown LLM provider prefix {head!r}; "
+            f"allowed: {sorted(_ALLOWED_PROVIDERS)}"
+        )
+    return model_ref
+
+
+def _can_produce_structured(model_ref: str) -> bool:
+    """Whether the resolved model can emit JSON for a structured role.
+
+    Only providers whose structured-output capability is `none` are rejected.
+    Today that's Anthropic-direct (its OpenAI-compat endpoint ignores
+    `response_format`). Groq `json_object` models are accepted — the router's
+    schema-injection + validate-and-retry path handles them.
+    """
+    provider, _model = _parse_provider(model_ref)
+    return provider != "anthropic"
 
 
 class LlmRoleConfig(BaseModel):
@@ -64,6 +106,18 @@ class LlmRoleUpdate(BaseModel):
     enabled: bool
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("primary_model")
+    @classmethod
+    def _check_primary_prefix(cls, v: str) -> str:
+        return _validate_provider_prefix(v)
+
+    @field_validator("fallback_chain")
+    @classmethod
+    def _check_fallback_prefixes(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            _validate_provider_prefix(entry)
+        return v
 
 
 @router.get("/llm-roles", response_model=LlmRoleListResponse)
@@ -105,6 +159,24 @@ def update_llm_role(
     tenant_id: TenantId,
     admin: RequireAdmin,
 ) -> LlmRoleConfig:
+    # Capability guard: structured roles need a model that can emit JSON.
+    # Checked here (not in the schema) because it depends on the path `role`.
+    if role in STRUCTURED_ROLES:
+        for model_ref in (body.primary_model, *body.fallback_chain):
+            if not _can_produce_structured(model_ref):
+                provider, _ = _parse_provider(model_ref)
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "model_cannot_produce_structured_output",
+                        "message": (
+                            f"Provider {provider!r} (model {model_ref!r}) cannot "
+                            f"produce structured JSON, which role {role!r} "
+                            "requires. Route this model through OpenRouter, or "
+                            "pick a structured-capable provider/model."
+                        ),
+                    },
+                )
     with tenant_session(tenant_id) as conn:
         row = conn.execute(
             text(

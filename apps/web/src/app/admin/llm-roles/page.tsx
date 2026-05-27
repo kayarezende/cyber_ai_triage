@@ -19,8 +19,9 @@ export default async function LlmRolesPage() {
         LLM role config
       </h1>
       <p className="text-sm text-zinc-400">
-        Six fields per role, surfaced exactly as the LLMRouter consumes them
-        (<code className="font-mono text-xs">primary_model</code>,{" "}
+        Choose a provider and model per role. Keys are managed on the{" "}
+        <code className="font-mono text-xs">Provider keys</code> page. Fields map
+        to what the LLMRouter consumes (<code className="font-mono text-xs">primary_model</code>,{" "}
         <code className="font-mono text-xs">fallback_chain</code>,{" "}
         <code className="font-mono text-xs">max_tokens</code>,{" "}
         <code className="font-mono text-xs">temperature</code>,{" "}

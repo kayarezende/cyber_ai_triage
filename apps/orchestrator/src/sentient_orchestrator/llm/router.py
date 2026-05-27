@@ -29,6 +29,8 @@ from sqlalchemy.engine import Connection
 
 from sentient_common.crypto import decrypt
 from sentient_common.logging import get_logger
+from sentient_orchestrator.llm import catalog
+from sentient_orchestrator.llm.catalog import ProviderSpec
 from sentient_orchestrator.llm.exceptions import (
     BudgetExceeded,
     FallbackChainExhausted,
@@ -61,7 +63,11 @@ class _RoleConfig:
 
 @dataclass(frozen=True)
 class _TenantConfig:
-    api_key: str
+    #: Per-provider BYO keys (decrypted), when a tenant supplied their own.
+    #: Keyed by provider name; only ``openrouter``/``anthropic`` have BYO
+    #: columns today. Falls through to the `provider_credentials` table, then
+    #: the provider's env var.
+    byo_keys: dict[str, str]
     region_constraint: str | None
     langsmith_enabled: bool
     #: Per-investigation USD cap. NULL = disabled.
@@ -204,18 +210,35 @@ class LLMRouter:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResult:
-        """Run one attempt. Raises `_AttemptFailedError` on retryable failure."""
-        response_format = _schema_to_response_format(response_schema)
+        """Run one attempt. Raises `_AttemptFailedError` on retryable failure.
+
+        `model` is the full stored ref (e.g. ``groq:openai/gpt-oss-120b``) —
+        kept verbatim for the usage ledger. It is resolved here to the provider
+        spec + capability + bare model used on the wire. The structured-output
+        ``response_format`` dialect is chosen from the capability, and for
+        non-strict providers the schema is also injected into the messages.
+        """
+        spec, capability, bare_model = catalog.resolve(model)
+        response_format, inject_schema = catalog.build_response_format(
+            capability, response_schema
+        )
+        call_messages = (
+            _with_schema_instruction(messages, response_schema)
+            if inject_schema and response_schema is not None
+            else messages
+        )
+        api_key = self._resolve_api_key(spec)
 
         try:
             response = await self._traced_call(
                 client=client,
-                api_key=self._tenant_cfg.api_key,
-                model=model,
-                messages=messages,
+                api_key=api_key,
+                model=bare_model,
+                messages=call_messages,
                 max_tokens=role_cfg.max_tokens,
                 temperature=role_cfg.temperature,
                 timeout=float(role_cfg.timeout_seconds),
+                spec=spec,
                 response_format=response_format,
                 region_constraint=self._tenant_cfg.region_constraint,
                 tools=tools,
@@ -239,7 +262,8 @@ class LLMRouter:
                 # Don't retry, don't write a misleading 'validation_fail'
                 # row; surface the real error so the operator rotates keys.
                 log.error(
-                    "openrouter auth failure",
+                    "llm provider auth failure",
+                    provider=spec.name,
                     role=role,
                     model=model,
                     status_code=exc.response.status_code,
@@ -289,10 +313,13 @@ class LLMRouter:
         if response_schema is not None:
             parsed_or_none, retry_response, retry_did_log = await self._validate_with_retry(
                 client=client,
+                spec=spec,
+                api_key=api_key,
+                bare_model=bare_model,
                 model=model,
                 role=role,
                 role_cfg=role_cfg,
-                messages=messages,
+                messages=call_messages,
                 response_format=response_format,
                 response=response,
                 response_schema=response_schema,
@@ -363,6 +390,9 @@ class LLMRouter:
         self,
         *,
         client: httpx.AsyncClient,
+        spec: ProviderSpec,
+        api_key: str,
+        bare_model: str,
         model: str,
         role: str,
         role_cfg: _RoleConfig,
@@ -428,12 +458,13 @@ class LLMRouter:
         try:
             retry_response = await self._traced_call(
                 client=client,
-                api_key=self._tenant_cfg.api_key,
-                model=model,
+                api_key=api_key,
+                model=bare_model,
                 messages=retry_messages,
                 max_tokens=role_cfg.max_tokens,
                 temperature=role_cfg.temperature,
                 timeout=float(role_cfg.timeout_seconds),
+                spec=spec,
                 response_format=response_format,
                 region_constraint=self._tenant_cfg.region_constraint,
             )
@@ -643,6 +674,45 @@ class LLMRouter:
                 cost_usd=response.cost_usd,
             )
 
+    # ------------------------------------------------------------- key resolve
+
+    def _resolve_api_key(self, spec: ProviderSpec) -> str:
+        """Resolve the API key for a provider, most-specific source first.
+
+        Precedence:
+          1. Tenant BYO key (decrypted at construction) for openrouter/anthropic.
+          2. `provider_credentials` row for this tenant + provider (decrypted now).
+          3. The provider's legacy env var (`spec.key_env`).
+        Raises ``RuntimeError`` with an actionable message when none is set —
+        surfaced to the operator rather than silently failing the chain.
+        """
+        byo = self._tenant_cfg.byo_keys.get(spec.name)
+        if byo:
+            return byo
+
+        row = self._conn.execute(
+            text(
+                """
+                SELECT key_encrypted
+                  FROM provider_credentials
+                 WHERE tenant_id = :tid AND provider = :provider
+                """
+            ),
+            {"tid": str(self._tenant_id), "provider": spec.name},
+        ).first()
+        if row is not None and row[0] is not None:
+            return decrypt(bytes(row[0]))
+
+        env_key = os.environ.get(spec.key_env)
+        if env_key and not env_key.startswith("CHANGEME_"):
+            return env_key
+
+        msg = (
+            f"no API key configured for provider {spec.name!r}; set one in "
+            f"Admin → Provider keys (or {spec.key_env} as a fallback)"
+        )
+        raise RuntimeError(msg)
+
     # ----------------------------------------------------------------- loaders
 
     @staticmethod
@@ -650,6 +720,7 @@ class LLMRouter:
         row = conn.execute(
             text("""
                 SELECT byo_openrouter_key_encrypted,
+                       byo_anthropic_key_encrypted,
                        llm_region_constraint,
                        COALESCE(langsmith_enabled, TRUE) AS langsmith_enabled,
                        per_investigation_budget_usd,
@@ -664,15 +735,22 @@ class LLMRouter:
             raise RuntimeError(msg)
 
         (
-            byo_key_encrypted,
+            byo_openrouter_encrypted,
+            byo_anthropic_encrypted,
             region_constraint,
             langsmith_enabled,
             budget_usd,
             token_cap,
         ) = row
-        api_key = _resolve_api_key(byo_key_encrypted)
+        # Decrypt BYO keys eagerly (once per investigation). Keyed by provider
+        # so the per-attempt resolver can match them to the resolved provider.
+        byo_keys: dict[str, str] = {}
+        if byo_openrouter_encrypted:
+            byo_keys["openrouter"] = decrypt(bytes(byo_openrouter_encrypted))
+        if byo_anthropic_encrypted:
+            byo_keys["anthropic"] = decrypt(bytes(byo_anthropic_encrypted))
         return _TenantConfig(
-            api_key=api_key,
+            byo_keys=byo_keys,
             region_constraint=region_constraint,
             langsmith_enabled=bool(langsmith_enabled),
             per_investigation_budget_usd=(Decimal(budget_usd) if budget_usd is not None else None),
@@ -722,20 +800,20 @@ def _classify_http_status(code: int) -> UsageStatus:
     return "validation_fail"
 
 
-def _schema_to_response_format(
-    schema: type[BaseModel] | None,
-) -> dict[str, Any] | None:
-    """Build OpenAI-compatible json_schema response_format from a Pydantic model."""
-    if schema is None:
-        return None
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": schema.__name__,
-            "strict": True,
-            "schema": schema.model_json_schema(),
-        },
-    }
+def _with_schema_instruction(
+    messages: list[dict[str, Any]],
+    schema: type[BaseModel],
+) -> list[dict[str, Any]]:
+    """Prepend a system message describing the target JSON schema.
+
+    Used when the resolved provider/model can't enforce the schema natively
+    (json_object / none modes — e.g. Groq llama-3.3, Anthropic OpenAI-compat).
+    The router's validate-and-retry loop remains the conformance safety net.
+    """
+    return [
+        {"role": "system", "content": catalog.schema_instruction(schema)},
+        *messages,
+    ]
 
 
 def _build_traced_call(
@@ -771,17 +849,6 @@ def _summarize_validation_errors(exc: ValidationError) -> str:
         loc = ".".join(str(x) for x in err.get("loc", ()))
         parts.append(f"{loc}: {err.get('type', '')} — {err.get('msg', '')}")
     return "; ".join(parts) or "schema validation failed"
-
-
-def _resolve_api_key(byo_encrypted: bytes | None) -> str:
-    """Return BYO-decrypted key if set, else OPENROUTER_API_KEY env var."""
-    if byo_encrypted:
-        return decrypt(bytes(byo_encrypted))
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key or key.startswith("CHANGEME_"):
-        msg = "OPENROUTER_API_KEY not configured"
-        raise RuntimeError(msg)
-    return key
 
 
 __all__ = ["ACTIVE_ROLES", "LLMResult", "LLMRouter"]

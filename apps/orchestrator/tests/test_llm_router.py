@@ -11,6 +11,7 @@ import httpx
 import pytest
 from pydantic import BaseModel, Field, ValidationError
 
+from sentient_orchestrator.llm import catalog
 from sentient_orchestrator.llm import router as router_module
 from sentient_orchestrator.llm.exceptions import (
     BudgetExceeded,
@@ -109,7 +110,10 @@ def _tenant_cfg(
     else:
         budget_decimal = Decimal(str(budget_usd))
     return _TenantConfig(
-        api_key="sk-test",
+        # BYO key for openrouter short-circuits _resolve_api_key before any DB
+        # read — bare test model slugs ("model-a") resolve to the openrouter
+        # provider, so this covers the loader-patched tests.
+        byo_keys={"openrouter": "sk-test"},
         region_constraint=region,
         langsmith_enabled=langsmith_enabled,
         per_investigation_budget_usd=budget_decimal,
@@ -405,38 +409,79 @@ async def test_region_constraint_threaded_through(
     assert captured["region_constraint"] == "au-southeast"
 
 
-@pytest.mark.asyncio
-async def test_master_key_falls_back_to_env(
+def _fake_conn_returning(value: object | None) -> MagicMock:
+    """A conn whose execute(...).first() returns a single-column row (or None)."""
+    conn = MagicMock()
+    first = MagicMock(return_value=(None if value is None else (value,)))
+    conn.execute.return_value.first = first
+    return conn
+
+
+def _router_with(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No BYO key → use env OPENROUTER_API_KEY."""
-    from sentient_orchestrator.llm.router import _resolve_api_key
+    *,
+    byo_keys: dict[str, str],
+    conn: MagicMock,
+) -> LLMRouter:
+    monkeypatch.setattr(
+        LLMRouter,
+        "_load_tenant_config",
+        staticmethod(
+            lambda _conn, _tid: _TenantConfig(
+                byo_keys=byo_keys,
+                region_constraint=None,
+                langsmith_enabled=True,
+                per_investigation_budget_usd=None,
+                per_investigation_token_cap=None,
+            )
+        ),
+    )
+    return LLMRouter(TENANT_ID, conn)
 
+
+def test_master_key_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No BYO key, no DB credential → use env OPENROUTER_API_KEY."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-master-12345")
-    assert _resolve_api_key(None) == "sk-master-12345"
+    router = _router_with(monkeypatch, byo_keys={}, conn=_fake_conn_returning(None))
+    spec = catalog.PROVIDERS["openrouter"]
+    assert router._resolve_api_key(spec) == "sk-master-12345"
 
 
-def test_byo_key_decrypts_via_fernet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """BYO encrypted bytes → Fernet decrypt → return plaintext, ignore env."""
+def test_byo_key_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BYO key wins over both DB credential and env."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-master-NEVER-USED")
+    router = _router_with(
+        monkeypatch,
+        byo_keys={"openrouter": "sk-byo-tenant-12345"},
+        conn=_fake_conn_returning(b"ignored-ciphertext"),
+    )
+    spec = catalog.PROVIDERS["openrouter"]
+    assert router._resolve_api_key(spec) == "sk-byo-tenant-12345"
+
+
+def test_db_credential_decrypts_via_fernet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No BYO key → a provider_credentials row is Fernet-decrypted, env ignored."""
     from cryptography.fernet import Fernet
 
     from sentient_common.crypto import encrypt
-    from sentient_orchestrator.llm.router import _resolve_api_key
 
-    # Generate a Fernet key for the test, set in env so encrypt/decrypt agree.
     monkeypatch.setenv("TENANT_SECRET_KEY", Fernet.generate_key().decode())
-    # Master env key set to a sentinel that should NOT be returned.
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-master-NEVER-USED")
-    encrypted = encrypt("sk-byo-tenant-12345")
-    assert _resolve_api_key(encrypted) == "sk-byo-tenant-12345"
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-env-NEVER-USED")
+    encrypted = encrypt("gsk-stored-12345")
+    router = _router_with(
+        monkeypatch, byo_keys={}, conn=_fake_conn_returning(encrypted)
+    )
+    spec = catalog.PROVIDERS["groq"]
+    assert router._resolve_api_key(spec) == "gsk-stored-12345"
 
 
-def test_resolve_api_key_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    from sentient_orchestrator.llm.router import _resolve_api_key
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "CHANGEME_openrouter")
-    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
-        _resolve_api_key(None)
+def test_resolve_api_key_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No BYO, no DB row, placeholder env → actionable RuntimeError."""
+    monkeypatch.setenv("GROQ_API_KEY", "CHANGEME_groq")
+    router = _router_with(monkeypatch, byo_keys={}, conn=_fake_conn_returning(None))
+    spec = catalog.PROVIDERS["groq"]
+    with pytest.raises(RuntimeError, match="no API key configured for provider 'groq'"):
+        router._resolve_api_key(spec)
 
 
 # ---------------------------------------------------------------- sovereignty
@@ -522,16 +567,33 @@ def test_classify_http_status() -> None:
     assert _classify_http_status(404) == "validation_fail"
 
 
-def test_schema_to_response_format() -> None:
-    from sentient_orchestrator.llm.router import _schema_to_response_format
+def test_build_response_format_strict() -> None:
+    cap = catalog._PROVIDER_DEFAULTS["openrouter"]
+    fmt_none, inject_none = catalog.build_response_format(cap, None)
+    assert fmt_none is None
+    assert inject_none is False
 
-    assert _schema_to_response_format(None) is None
-    fmt = _schema_to_response_format(_Out)
+    fmt, inject = catalog.build_response_format(cap, _Out)
+    assert inject is False
     assert fmt is not None
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["name"] == "_Out"
     assert fmt["json_schema"]["strict"] is True
     assert "schema" in fmt["json_schema"]
+
+
+def test_build_response_format_json_object_injects_schema() -> None:
+    cap = catalog._PROVIDER_DEFAULTS["groq"]  # json_object
+    fmt, inject = catalog.build_response_format(cap, _Out)
+    assert fmt == {"type": "json_object"}
+    assert inject is True
+
+
+def test_build_response_format_none_injects_only() -> None:
+    cap = catalog._PROVIDER_DEFAULTS["anthropic"]  # none
+    fmt, inject = catalog.build_response_format(cap, _Out)
+    assert fmt is None
+    assert inject is True
 
 
 def test_pydantic_validation_independent() -> None:

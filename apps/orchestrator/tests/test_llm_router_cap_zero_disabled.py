@@ -83,7 +83,7 @@ async def test_cap_zero_means_disabled_no_raise(
     _patch_loaders(
         monkeypatch,
         tenant_cfg=_TenantConfig(
-            api_key="k",
+            byo_keys={"openrouter": "k"},
             region_constraint=None,
             langsmith_enabled=True,
             per_investigation_budget_usd=budget,
@@ -120,7 +120,7 @@ async def test_cap_active_with_overshoot_still_raises(
     _patch_loaders(
         monkeypatch,
         tenant_cfg=_TenantConfig(
-            api_key="k",
+            byo_keys={"openrouter": "k"},
             region_constraint=None,
             langsmith_enabled=True,
             per_investigation_budget_usd=Decimal("0.50"),
